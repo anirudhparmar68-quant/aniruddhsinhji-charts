@@ -10,6 +10,7 @@
 //!   spider_charts.exe            desktop app
 //!   spider_charts.exe --sync     headless full sync, for a nightly scheduled task
 
+mod bhavcopy;
 mod config;
 mod model;
 mod patterns;

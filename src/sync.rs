@@ -19,6 +19,15 @@ use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, RwLock};
 
+/// Overlap re-requested on every top-up. Wide on purpose — see the note in
+/// `backfill`; narrow tail requests come back stale.
+const TAIL_OVERLAP_DAYS: i64 = 30;
+
+/// Calendar days of tail re-taken from the exchanges' own bhavcopy files after
+/// every backfill. Ten covers a long weekend plus a holiday and still costs
+/// only a handful of file downloads.
+const BHAVCOPY_TAIL_DAYS: i64 = 10;
+
 /// Trading day in India, so a late-evening run still means "today".
 pub fn today_ist() -> NaiveDate {
     let ist = FixedOffset::east_opt(5 * 3600 + 30 * 60).expect("IST offset is valid");
@@ -43,6 +52,7 @@ pub struct LatestSummary {
     pub best_score: f64,
     /// Labels of the detections, strongest first.
     pub patterns: Vec<String>,
+    pub close: f64,
     pub change_pct: f64,
     /// Session volume divided by its 50-day average.
     pub volume_ratio: f64,
@@ -116,6 +126,14 @@ pub struct Shared {
     pub latest_session: Option<NaiveDate>,
     /// instrument_key → what happened on `latest_session`.
     pub latest_hits: Arc<HashMap<String, LatestSummary>>,
+    /// Included stocks whose newest bar is older than `latest_session`.
+    ///
+    /// Upstox publishes each day's daily candle some hours after the close, and
+    /// not for every scrip at once. A sync run too early therefore leaves part
+    /// of the universe a session behind — and those stocks then vanish from the
+    /// "latest candle" views without explanation. This count is what makes that
+    /// visible instead of silent.
+    pub stale_count: usize,
 }
 
 impl Shared {
@@ -431,10 +449,13 @@ impl WorkerCtx {
         let mut jobs = Vec::with_capacity(targets.len());
         for inst in &targets {
             let from = match store::last_candle_date(&conn, &inst.instrument_key)? {
-                // Re-request the last stored session too: it may have been a
-                // partial bar if the previous run happened during market hours.
                 Some(last) if last >= to => continue,
-                Some(last) => (last - Duration::days(1)).max(earliest),
+                // Deliberately a wide overlap rather than "resume from the last
+                // stored bar". Upstox will answer a narrow tail request with a
+                // stale copy that omits the newest session — measured on the
+                // same instrument, the same minute: a 5-day window returned
+                // Friday's close while a 30-day window returned Monday's.
+                Some(last) => (last - Duration::days(TAIL_OVERLAP_DAYS)).max(earliest),
                 None => earliest,
             };
             jobs.push((inst.clone(), from));
@@ -482,6 +503,11 @@ impl WorkerCtx {
             }
         }
 
+        drop(conn);
+        // The exchanges get the last word on the tail.
+        self.bhavcopy_topup(&targets, to).await?;
+
+        let conn = store::open()?;
         store::prune_before(&conn, earliest)?;
         self.last_failed = failed;
 
@@ -502,6 +528,61 @@ impl WorkerCtx {
 
         self.load_from_disk()?;
         Ok(())
+    }
+
+    /// Overwrite the recent tail from the exchanges' own daily files.
+    ///
+    /// This is the fix for the problem Upstox cannot be trusted on: its
+    /// historical endpoint intermittently answers with a cached tail that omits
+    /// the newest session, and which answer you get depends on the window you
+    /// asked for. A bhavcopy is one file per exchange per session covering every
+    /// scrip that traded, published by the exchange itself — nothing to cache
+    /// wrong, nothing to rate-limit, and it carries ISIN so matching is exact.
+    ///
+    /// Days that return nothing are weekends, holidays, or a session not yet
+    /// published; all three are normal and none is an error.
+    async fn bhavcopy_topup(&mut self, targets: &[Instrument], to: NaiveDate) -> Result<usize> {
+        let known: std::collections::HashSet<&str> =
+            targets.iter().map(|i| i.instrument_key.as_str()).collect();
+
+        let mut conn = store::open()?;
+        let mut written = 0usize;
+        let mut sessions = 0usize;
+
+        self.status("Taking the recent sessions from NSE + BSE bhavcopy…");
+        for back in 0..BHAVCOPY_TAIL_DAYS {
+            let date = to - Duration::days(back);
+            let day = match crate::bhavcopy::fetch_day(&self.client, date).await {
+                Ok(day) => day,
+                Err(e) => {
+                    let _ = self
+                        .events
+                        .send(Event::Error(format!("bhavcopy for {date} unavailable: {e:#}")));
+                    continue;
+                }
+            };
+            if day.is_empty() {
+                continue;
+            }
+
+            let rows: Vec<(String, Candle)> = day
+                .into_iter()
+                .filter(|(key, _)| known.contains(key.as_str()))
+                .collect();
+            if rows.is_empty() {
+                continue;
+            }
+            sessions += 1;
+            written += store::save_session(&mut conn, &rows)?;
+            self.progress(
+                sessions,
+                BHAVCOPY_TAIL_DAYS as usize,
+                format!("{date} · {} stocks", rows.len()),
+            );
+        }
+
+        self.status(format!("Bhavcopy: {sessions} sessions confirmed, {written} bars written"));
+        Ok(written)
     }
 
     // -- disk → memory ------------------------------------------------------
@@ -544,14 +625,36 @@ impl WorkerCtx {
             .max();
 
         let included = instruments.iter().filter(|i| i.included).count();
+        let stale_count = instruments
+            .iter()
+            .filter(|i| i.included)
+            .filter(|i| {
+                candles
+                    .get(&i.instrument_key)
+                    .and_then(|series| series.last())
+                    .map(|bar| Some(bar.date) != latest_session)
+                    .unwrap_or(true)
+            })
+            .count();
+
         self.publish(move |shared| {
             shared.instruments = Arc::new(instruments);
             shared.candles = Arc::new(candles);
             shared.stats = stats;
             shared.last_sync = last_sync;
             shared.latest_session = latest_session;
+            shared.stale_count = stale_count;
         });
         let _ = self.events.send(Event::DataChanged);
+
+        if stale_count > 0 {
+            let _ = self.events.send(Event::Error(format!(
+                "{stale_count} of {included} stocks are a session behind {}. Upstox publishes \
+                 daily candles a few hours after the close and not for every scrip at once, so a \
+                 sync run too early catches only part of the market. Press History to top them up.",
+                latest_session.map(|d| d.to_string()).unwrap_or_default()
+            )));
+        }
         self.status(format!("{included} stocks in the universe"));
         Ok(())
     }
@@ -706,6 +809,7 @@ fn build_latest_summaries(
             continue;
         }
         let end = series.len() - 1;
+        summary.close = last.close;
 
         let prev = series[end - 1].close;
         if prev > 0.0 {
@@ -933,6 +1037,53 @@ mod tests {
 
         assert!(before.latest_session.is_none(), "an old snapshot must not mutate underneath its reader");
         assert!(snapshot(&state).latest_session.is_some());
+    }
+
+    #[test]
+    fn stale_stocks_are_counted_not_hidden() {
+        use crate::model::{Candle, Exchange, Instrument};
+        use chrono::NaiveDate;
+
+        let day = |d: u32| NaiveDate::from_ymd_opt(2026, 8, d).unwrap();
+        let bar = |d: u32| Candle {
+            date: day(d),
+            open: 100.0,
+            high: 101.0,
+            low: 99.0,
+            close: 100.5,
+            volume: 1_000,
+        };
+        let inst = |key: &str| Instrument {
+            instrument_key: key.into(),
+            symbol: key.into(),
+            name: String::new(),
+            isin: String::new(),
+            exchange: Exchange::Nse,
+            mcap_cr: None,
+            included: true,
+        };
+
+        let instruments = vec![inst("FRESH"), inst("STALE"), inst("ALSO_STALE")];
+        let mut candles: HashMap<String, Vec<Candle>> = HashMap::new();
+        candles.insert("FRESH".into(), vec![bar(7), bar(10)]);
+        candles.insert("STALE".into(), vec![bar(6), bar(7)]);
+        candles.insert("ALSO_STALE".into(), vec![bar(7)]);
+
+        let latest = candles.values().filter_map(|s| s.last().map(|c| c.date)).max();
+        assert_eq!(latest, Some(day(10)));
+
+        let stale = instruments
+            .iter()
+            .filter(|i| i.included)
+            .filter(|i| {
+                candles
+                    .get(&i.instrument_key)
+                    .and_then(|s| s.last())
+                    .map(|b| Some(b.date) != latest)
+                    .unwrap_or(true)
+            })
+            .count();
+        assert_eq!(stale, 2, "both stocks stuck on the 7th must be reported");
     }
 
     #[test]

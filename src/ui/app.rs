@@ -10,9 +10,56 @@ use egui::{Color32, RichText};
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum Tab {
+    /// One row per stock for the newest candle — the question the app opens on.
+    Today,
     Chart,
     Scanner,
     Settings,
+}
+
+/// Which side of the book the Today list is showing.
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum Bias {
+    Bullish,
+    Bearish,
+    Everything,
+}
+
+impl Bias {
+    fn label(self) -> &'static str {
+        match self {
+            Bias::Bullish => "Bullish",
+            Bias::Bearish => "Bearish",
+            Bias::Everything => "Everything",
+        }
+    }
+}
+
+/// One aggregated stock line on the Today tab: every pattern that completed on
+/// the newest candle, rolled up with the price context to judge it by.
+struct TodayRow {
+    key: String,
+    symbol: String,
+    name: String,
+    bullish: usize,
+    bearish: usize,
+    neutral: usize,
+    best: f64,
+    conviction: f64,
+    close: f64,
+    change_pct: f64,
+    volume_ratio: f64,
+    rsi: f64,
+    patterns: String,
+}
+
+impl TodayRow {
+    /// Patterns pointing both ways on the same candle. Worth flagging rather
+    /// than hiding: the conviction score already nets them off, but a reader
+    /// should see that the signal is contested.
+    fn conflicted(&self) -> bool {
+        self.bullish > 0 && self.bearish > 0
+    }
 }
 
 /// How far back the scanner looks, measured from the newest session in the
@@ -46,6 +93,29 @@ impl Window {
             Window::Week => latest - Duration::days(7),
             Window::Month => latest - Duration::days(30),
             Window::All => NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch is a valid date"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TodaySort {
+    Patterns,
+    Conviction,
+    Change,
+    Volume,
+    Rsi,
+    Symbol,
+}
+
+impl TodaySort {
+    fn label(self) -> &'static str {
+        match self {
+            TodaySort::Patterns => "Patterns",
+            TodaySort::Conviction => "Conf",
+            TodaySort::Change => "Chg%",
+            TodaySort::Volume => "Vol×",
+            TodaySort::Rsi => "RSI",
+            TodaySort::Symbol => "Symbol",
         }
     }
 }
@@ -148,6 +218,11 @@ pub struct SpiderApp {
     only_latest_hits: bool,
     sort_key: SortKey,
     sort_desc: bool,
+    today_bias: Bias,
+    today_min_patterns: usize,
+    today_hide_conflicted: bool,
+    today_sort: TodaySort,
+    today_sort_desc: bool,
     /// Row the list should scroll into view on the next frame, set by keyboard
     /// navigation so the selection never disappears off-screen.
     scroll_target: Option<usize>,
@@ -160,7 +235,9 @@ impl SpiderApp {
             worker,
             settings_draft: settings.clone(),
             settings,
-            tab: Tab::Chart,
+            // Opens on the aggregated view of the newest candle, not a chart:
+            // "what printed tonight" is the first question, every night.
+            tab: Tab::Today,
             search: String::new(),
             selected: None,
             chart: ChartView::default(),
@@ -172,6 +249,11 @@ impl SpiderApp {
             only_latest_hits: false,
             sort_key: SortKey::Conviction,
             sort_desc: true,
+            today_bias: Bias::Bullish,
+            today_min_patterns: 1,
+            today_hide_conflicted: false,
+            today_sort: TodaySort::Patterns,
+            today_sort_desc: true,
             scroll_target: None,
         }
     }
@@ -260,6 +342,7 @@ impl eframe::App for SpiderApp {
         self.sidebar(ui);
 
         egui::CentralPanel::default().show(ui, |ui| match self.tab {
+            Tab::Today => self.today_tab(ui),
             Tab::Chart => self.chart_tab(ui),
             Tab::Scanner => self.scanner_tab(ui),
             Tab::Settings => self.settings_tab(ui),
@@ -277,6 +360,7 @@ impl SpiderApp {
             ui.horizontal(|ui| {
                 ui.heading("Spider Charts");
                 ui.separator();
+                ui.selectable_value(&mut self.tab, Tab::Today, "Today");
                 ui.selectable_value(&mut self.tab, Tab::Chart, "Chart");
                 ui.selectable_value(&mut self.tab, Tab::Scanner, "Scanner");
                 ui.selectable_value(&mut self.tab, Tab::Settings, "Settings");
@@ -300,7 +384,8 @@ impl SpiderApp {
                 });
 
                 ui.separator();
-                let stats = self.snapshot().stats;
+                let snap = self.snapshot();
+                let stats = snap.stats;
                 ui.label(
                     RichText::new(format!(
                         "{} in universe · {} mcap resolved · {} on liquidity",
@@ -310,6 +395,21 @@ impl SpiderApp {
                     ))
                     .small(),
                 );
+                // Stale data is worse than missing data: it looks fine and
+                // quietly shrinks every "latest candle" view.
+                if snap.stale_count > 0 {
+                    ui.label(
+                        RichText::new(format!("⚠ {} stocks a session behind", snap.stale_count))
+                            .small()
+                            .strong()
+                            .color(Color32::from_rgb(235, 170, 60)),
+                    )
+                    .on_hover_text(
+                        "Upstox publishes daily candles a few hours after the close, and not for \
+                         every scrip at once. These stocks are missing the newest session, so they \
+                         are absent from Today and the Scanner. Press History to top them up.",
+                    );
+                }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let dark = ui.visuals().dark_mode;
@@ -500,6 +600,239 @@ impl SpiderApp {
                     self.select(key);
                 }
             });
+    }
+
+    // -----------------------------------------------------------------------
+    // Today tab — one line per stock for the newest candle
+    // -----------------------------------------------------------------------
+
+    fn today_tab(&mut self, ui: &mut egui::Ui) {
+        let snap = self.snapshot();
+        let Some(latest) = snap.latest_session else {
+            ui.centered_and_justified(|ui| {
+                ui.label(RichText::new("No price data yet — press Full sync.").weak());
+            });
+            return;
+        };
+
+        let by_key: std::collections::HashMap<&str, &Instrument> = snap
+            .instruments
+            .iter()
+            .map(|i| (i.instrument_key.as_str(), i))
+            .collect();
+
+        let mut rows: Vec<TodayRow> = snap
+            .latest_hits
+            .iter()
+            .filter_map(|(key, s)| {
+                let inst = by_key.get(key.as_str())?;
+                if !inst.included {
+                    return None;
+                }
+                Some(TodayRow {
+                    key: key.clone(),
+                    symbol: inst.symbol.clone(),
+                    name: inst.name.clone(),
+                    bullish: s.bullish,
+                    bearish: s.bearish,
+                    neutral: s.neutral,
+                    best: s.best_score,
+                    conviction: s.conviction(),
+                    close: s.close,
+                    change_pct: s.change_pct,
+                    volume_ratio: s.volume_ratio,
+                    rsi: s.rsi,
+                    patterns: s.patterns.join(", "),
+                })
+            })
+            .collect();
+        drop(snap);
+
+        let total_stocks = rows.len();
+        let bias = self.today_bias;
+        let min_patterns = self.today_min_patterns;
+        let hide_conflicted = self.today_hide_conflicted;
+        rows.retain(|r| {
+            let leading = match bias {
+                Bias::Bullish => r.bullish,
+                Bias::Bearish => r.bearish,
+                Bias::Everything => r.bullish + r.bearish + r.neutral,
+            };
+            leading >= min_patterns.max(1) && !(hide_conflicted && r.conflicted())
+        });
+        sort_today_rows(&mut rows, self.today_sort, self.today_sort_desc, bias);
+
+        // -- controls ---------------------------------------------------------
+        ui.horizontal_wrapped(|ui| {
+            for option in [Bias::Bullish, Bias::Bearish, Bias::Everything] {
+                ui.selectable_value(&mut self.today_bias, option, option.label());
+            }
+            ui.separator();
+            ui.add(
+                egui::Slider::new(&mut self.today_min_patterns, 1..=6).text("min patterns"),
+            )
+            .on_hover_text("How many patterns must agree before a stock is listed");
+            ui.checkbox(&mut self.today_hide_conflicted, "hide conflicted")
+                .on_hover_text("Drop stocks that printed patterns in both directions");
+            ui.separator();
+            ui.label(
+                RichText::new(format!("candle: {}", latest.format("%a %d %b %Y")))
+                    .small()
+                    .weak(),
+            );
+        });
+
+        let clean = rows.iter().filter(|r| !r.conflicted()).count();
+        let stale = self.snapshot().stale_count;
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(format!(
+                    "{} of {} stocks · {clean} with no opposing pattern",
+                    rows.len(),
+                    total_stocks
+                ))
+                .small()
+                .strong(),
+            );
+            if stale > 0 {
+                ui.label(
+                    RichText::new(format!("· {stale} stocks not counted — data a session behind"))
+                        .small()
+                        .color(Color32::from_rgb(235, 170, 60)),
+                )
+                .on_hover_text("Press History on the toolbar to fetch their missing session");
+            }
+            if ui
+                .small_button("Export CSV")
+                .on_hover_text("Write this exact list to data/today_export.csv")
+                .clicked()
+            {
+                self.status = match export_today_csv(&rows, latest) {
+                    Ok(path) => format!("Exported {} stocks to {path}", rows.len()),
+                    Err(e) => format!("⚠ export failed: {e:#}"),
+                };
+            }
+        });
+        ui.separator();
+
+        if rows.is_empty() {
+            ui.add_space(12.0);
+            ui.label(RichText::new("Nothing matches — try lowering “min patterns”.").weak());
+            return;
+        }
+
+        // -- table ------------------------------------------------------------
+        let mut clicked = None;
+        let mut new_sort = None;
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            egui::Grid::new("today").striped(true).num_columns(9).show(ui, |ui| {
+                let mut header = |ui: &mut egui::Ui, key: TodaySort| {
+                    let arrow = if self.today_sort == key {
+                        if self.today_sort_desc { " ▼" } else { " ▲" }
+                    } else {
+                        ""
+                    };
+                    if ui
+                        .add(
+                            egui::Label::new(
+                                RichText::new(format!("{}{arrow}", key.label())).small().strong(),
+                            )
+                            .sense(egui::Sense::click()),
+                        )
+                        .clicked()
+                    {
+                        new_sort = Some(key);
+                    }
+                };
+                header(ui, TodaySort::Symbol);
+                header(ui, TodaySort::Patterns);
+                ui.label(RichText::new("Bull").small().strong());
+                ui.label(RichText::new("Bear").small().strong());
+                header(ui, TodaySort::Conviction);
+                ui.label(RichText::new("Close").small().strong());
+                header(ui, TodaySort::Change);
+                header(ui, TodaySort::Volume);
+                ui.label(RichText::new("Patterns").small().strong());
+                ui.end_row();
+
+                for row in &rows {
+                    let label = if row.conflicted() {
+                        RichText::new(format!("{} ⚠", row.symbol)).monospace().strong()
+                    } else {
+                        RichText::new(&row.symbol).monospace().strong()
+                    };
+                    if ui
+                        .add(egui::Label::new(label).sense(egui::Sense::click()))
+                        .on_hover_text(if row.conflicted() {
+                            format!("{}\nPatterns point both ways on this candle", row.name)
+                        } else {
+                            row.name.clone()
+                        })
+                        .clicked()
+                    {
+                        clicked = Some(row.key.clone());
+                    }
+
+                    let total = row.bullish + row.bearish + row.neutral;
+                    ui.label(RichText::new(total.to_string()).monospace().small());
+                    ui.label(
+                        RichText::new(row.bullish.to_string())
+                            .monospace()
+                            .small()
+                            .color(Color32::from_rgb(70, 200, 130)),
+                    );
+                    ui.label(
+                        RichText::new(row.bearish.to_string())
+                            .monospace()
+                            .small()
+                            .color(Color32::from_rgb(235, 100, 110)),
+                    );
+                    ui.label(
+                        RichText::new(format!("{:+.2}", row.conviction))
+                            .monospace()
+                            .small()
+                            .strong()
+                            .color(conviction_colour(row.conviction)),
+                    );
+                    ui.label(RichText::new(format!("{:.2}", row.close)).monospace().small());
+                    ui.label(
+                        RichText::new(format!("{:+.2}", row.change_pct))
+                            .monospace()
+                            .small()
+                            .color(if row.change_pct >= 0.0 {
+                                Color32::from_rgb(60, 170, 110)
+                            } else {
+                                Color32::from_rgb(210, 80, 90)
+                            }),
+                    );
+                    // Heavy volume is the difference between a pattern that
+                    // matters and one that printed on nobody trading, so it is
+                    // highlighted rather than left as another grey number.
+                    let vol = RichText::new(format!("{:.1}×", row.volume_ratio)).monospace().small();
+                    ui.label(if row.volume_ratio >= 2.0 {
+                        vol.strong().color(Color32::from_rgb(230, 190, 90))
+                    } else if row.volume_ratio < 0.7 {
+                        vol.weak()
+                    } else {
+                        vol
+                    });
+                    ui.label(RichText::new(&row.patterns).small().weak());
+                    ui.end_row();
+                }
+            });
+        });
+
+        if let Some(key) = new_sort {
+            if self.today_sort == key {
+                self.today_sort_desc = !self.today_sort_desc;
+            } else {
+                self.today_sort = key;
+                self.today_sort_desc = true;
+            }
+        }
+        if let Some(key) = clicked {
+            self.select(key);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1127,6 +1460,77 @@ fn sort_rows(rows: &mut [ScanDisplayRow], key: SortKey, desc: bool) {
         let ordering = if desc { ordering.reverse() } else { ordering };
         ordering.then_with(|| a.symbol.cmp(&b.symbol)).then_with(|| a.pattern.cmp(b.pattern))
     });
+}
+
+/// Order the Today table.
+///
+/// "Patterns" sorts by the count that matters for the current bias — bullish
+/// hits when hunting longs, bearish when hunting shorts — so the column always
+/// means what the filter above it says. Conviction breaks ties, and symbol
+/// breaks those, so the table never reshuffles between frames.
+fn sort_today_rows(rows: &mut [TodayRow], sort: TodaySort, desc: bool, bias: Bias) {
+    use std::cmp::Ordering;
+    let num = |x: f64, y: f64| x.partial_cmp(&y).unwrap_or(Ordering::Equal);
+    let leading = |r: &TodayRow| match bias {
+        Bias::Bullish => r.bullish,
+        Bias::Bearish => r.bearish,
+        Bias::Everything => r.bullish + r.bearish + r.neutral,
+    };
+
+    rows.sort_by(|a, b| {
+        let ordering = match sort {
+            TodaySort::Patterns => leading(a)
+                .cmp(&leading(b))
+                .then_with(|| num(a.conviction.abs(), b.conviction.abs())),
+            TodaySort::Conviction => num(a.conviction.abs(), b.conviction.abs()),
+            TodaySort::Change => num(a.change_pct, b.change_pct),
+            TodaySort::Volume => num(a.volume_ratio, b.volume_ratio),
+            TodaySort::Rsi => num(a.rsi, b.rsi),
+            TodaySort::Symbol => a.symbol.cmp(&b.symbol),
+        };
+        let ordering = if desc { ordering.reverse() } else { ordering };
+        ordering.then_with(|| a.symbol.cmp(&b.symbol))
+    });
+}
+
+fn conviction_colour(conviction: f64) -> Color32 {
+    if conviction > 0.15 {
+        Color32::from_rgb(70, 200, 130)
+    } else if conviction < -0.15 {
+        Color32::from_rgb(235, 100, 110)
+    } else {
+        Color32::from_gray(150)
+    }
+}
+
+/// Write the Today list to `data/today_export.csv`.
+fn export_today_csv(rows: &[TodayRow], latest: NaiveDate) -> anyhow::Result<String> {
+    let path = crate::config::data_dir().join("today_export.csv");
+    let mut out = String::from(
+        "session,symbol,name,total,bullish,bearish,neutral,best_score,conviction,\
+         close,change_pct,volume_ratio,rsi,patterns\n",
+    );
+    for r in rows {
+        out.push_str(&format!(
+            "{},{},{},{},{},{},{},{:.3},{:.3},{:.2},{:.2},{:.2},{:.1},{}\n",
+            latest,
+            r.symbol,
+            csv_quote(&r.name),
+            r.bullish + r.bearish + r.neutral,
+            r.bullish,
+            r.bearish,
+            r.neutral,
+            r.best,
+            r.conviction,
+            r.close,
+            r.change_pct,
+            r.volume_ratio,
+            r.rsi,
+            csv_quote(&r.patterns),
+        ));
+    }
+    std::fs::write(&path, out)?;
+    Ok(path.display().to_string())
 }
 
 fn csv_quote(value: &str) -> String {

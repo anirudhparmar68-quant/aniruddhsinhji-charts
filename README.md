@@ -13,8 +13,9 @@ Built for **overnight/positional** work only — there is no intraday mode by de
   de-duplicated by ISIN (NSE preferred for dual-listed names), then filtered on
   price and traded value. Listed **alphabetically**. Currently 2,161 stocks:
   2,080 from NSE and 81 that trade only on BSE.
-- **Data** — daily OHLCV from the Upstox V3 historical API, stored in SQLite.
-  Re-runs fetch only the missing sessions.
+- **Data** — daily OHLCV in SQLite, from two sources on purpose: **Upstox** for
+  building history, and the exchanges' own **NSE + BSE bhavcopy** for the recent
+  tail. See below for why.
 - **Patterns** — every detection runs automatically over the whole universe:
   - **75 candlestick patterns** (the full classical set: dojis, hammers,
     engulfing, harami, stars, soldiers/crows, kickers, tasuki gaps, three
@@ -200,6 +201,39 @@ All tunables live in the **Settings** tab and persist to `data/settings.json`:
 | Parallel downloads | 8 | How many requests may be in flight |
 | Requests per second | 4 | **Global** rate cap — see below |
 | Minimum pattern score | 0.5 | Raise to cut noise in the scanner |
+
+### Why the newest session comes from bhavcopy, not Upstox
+
+Upstox is fine for bulk history and useless for the tail. Measured on RELIANCE,
+within the same minute, against the same endpoint:
+
+| window requested | newest bar returned |
+|---|---|
+| 5 days | 07 Aug ❌ |
+| 10 days | 10 Aug ✅ |
+| 30 days | 10 Aug ✅ |
+| 400 days | 07 Aug ❌ |
+
+It is not deterministic and not per-instrument — a 45-day window returned the
+newest bar for INFY and a stale one for four other stocks in the same sweep. The
+practical effect was ugly: a sync would report *"2161 downloaded, 0 failed"* while
+1,368 stocks silently sat a session behind, and every "latest candle" view then
+quietly excluded them.
+
+So the newest sessions are taken from the exchanges instead. A bhavcopy is one
+file per exchange per session covering every scrip that traded — nothing to
+cache wrong, no rate limit, no per-symbol requests — and both NSE and BSE publish
+the same UDiFF layout carrying **ISIN**, which is exactly what this app keys
+instruments on, so matching is exact rather than by name.
+
+Every backfill therefore ends by re-taking the last 10 calendar days from
+bhavcopy and upserting them, which also repairs any bad bars written earlier. A
+row whose `TradDt` does not match the session being requested is rejected, so a
+mislabelled or cached file cannot be written under the wrong date.
+
+What this does **not** fix: running a sync before the exchange has published.
+Run it after **19:00 IST**. If anything is still behind, the toolbar says
+`⚠ N stocks a session behind` rather than pretending everything is current.
 
 ### Why there is a rate cap as well as a concurrency limit
 

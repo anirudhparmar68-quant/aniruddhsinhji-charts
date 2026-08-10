@@ -154,6 +154,40 @@ pub fn save_candles(conn: &mut Connection, key: &str, candles: &[Candle]) -> Res
     Ok(written)
 }
 
+/// Upsert one session across many instruments in a single transaction.
+///
+/// A bhavcopy covers a few thousand stocks at once; doing that as one
+/// transaction per stock would mean thousands of fsyncs for one day's data.
+pub fn save_session(conn: &mut Connection, rows: &[(String, Candle)]) -> Result<usize> {
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    let tx = conn.transaction()?;
+    let mut written = 0usize;
+    {
+        let mut stmt = tx.prepare(
+            "INSERT INTO candles (instrument_key, d, o, h, l, c, v)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(instrument_key, d) DO UPDATE SET
+                o = excluded.o, h = excluded.h, l = excluded.l,
+                c = excluded.c, v = excluded.v",
+        )?;
+        for (key, candle) in rows {
+            written += stmt.execute(params![
+                key,
+                candle.date.to_string(),
+                candle.open,
+                candle.high,
+                candle.low,
+                candle.close,
+                candle.volume
+            ])?;
+        }
+    }
+    tx.commit()?;
+    Ok(written)
+}
+
 pub fn load_candles(conn: &Connection, key: &str) -> Result<Vec<Candle>> {
     let mut stmt = conn.prepare(
         "SELECT d, o, h, l, c, v FROM candles WHERE instrument_key = ?1 ORDER BY d",
