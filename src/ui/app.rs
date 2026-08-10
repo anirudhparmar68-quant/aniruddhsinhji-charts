@@ -3,7 +3,7 @@
 use crate::config::Settings;
 use crate::model::Instrument;
 use crate::patterns::types::{Detection, Direction, Family, PatternKind};
-use crate::sync::{self, Command, Event, ScanRow, Worker};
+use crate::sync::{self, Command, Event, Worker};
 use crate::ui::chart::{self, ChartView};
 use chrono::{Duration, NaiveDate};
 use egui::{Color32, RichText};
@@ -537,7 +537,6 @@ impl SpiderApp {
                     ui.label(RichText::new(last.date.format("%d %b %Y").to_string()).small().weak());
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.checkbox(&mut self.chart.show_overlays, "Structures");
                     ui.checkbox(&mut self.chart.show_markers, "Markers");
                     ui.checkbox(&mut self.chart.show_ma, "MA");
                     ui.checkbox(&mut self.chart.show_volume, "Volume");
@@ -999,69 +998,12 @@ impl SpiderApp {
         });
 
         ui.add_space(12.0);
-        ui.collapsing("Cup and Handle — shape thresholds", |ui| {
-            ui.label(
-                RichText::new(
-                    "The only geometric pattern with genuinely contested rules, so its \
-                     thresholds live here rather than being baked in.",
-                )
-                .small()
-                .weak(),
-            );
-            ui.add_space(6.0);
-            let cup = &mut self.settings_draft.patterns.cup;
-            egui::Grid::new("settings_cup").num_columns(2).spacing([16.0, 8.0]).show(ui, |ui| {
-                ui.label("Cup depth range");
-                ui.horizontal(|ui| {
-                    ui.add(egui::DragValue::new(&mut cup.min_depth).speed(0.01).range(0.02..=0.9).prefix("min "));
-                    ui.add(egui::DragValue::new(&mut cup.max_depth).speed(0.01).range(0.05..=0.95).prefix("max "));
-                    ui.label(RichText::new("(fraction of the rim)").small().weak());
-                });
-                ui.end_row();
-
-                ui.label("Cup length (bars)");
-                ui.horizontal(|ui| {
-                    ui.add(egui::DragValue::new(&mut cup.min_cup_bars).speed(1.0).range(5..=400).prefix("min "));
-                    ui.add(egui::DragValue::new(&mut cup.max_cup_bars).speed(1.0).range(10..=400).prefix("max "));
-                });
-                ui.end_row();
-
-                ui.label("Minimum roundness");
-                ui.add(egui::Slider::new(&mut cup.min_roundness, 0.0..=0.9))
-                    .on_hover_text("How much flatter the base must be than the cup's legs. 0 accepts a V.");
-                ui.end_row();
-
-                ui.label("Maximum rim asymmetry");
-                ui.add(egui::Slider::new(&mut cup.max_rim_asymmetry, 0.0..=0.4));
-                ui.end_row();
-
-                ui.label("Handle length (bars)");
-                ui.horizontal(|ui| {
-                    ui.add(egui::DragValue::new(&mut cup.min_handle_bars).speed(1.0).range(1..=100).prefix("min "));
-                    ui.add(egui::DragValue::new(&mut cup.max_handle_bars).speed(1.0).range(2..=120).prefix("max "));
-                });
-                ui.end_row();
-
-                ui.label("Handle retracement of cup depth");
-                ui.add(egui::Slider::new(&mut cup.max_handle_retrace, 0.1..=0.9));
-                ui.end_row();
-
-                ui.label("Handle depth range");
-                ui.horizontal(|ui| {
-                    ui.add(egui::DragValue::new(&mut cup.min_handle_depth).speed(0.005).range(0.0..=0.5).prefix("min "));
-                    ui.add(egui::DragValue::new(&mut cup.max_handle_depth).speed(0.005).range(0.01..=0.6).prefix("max "));
-                });
-                ui.end_row();
-            });
-        });
-
-        ui.add_space(8.0);
         ui.collapsing("Cup & Handle Breakout — your Chartink scan", |ui| {
             ui.label(
                 RichText::new(
-                    "A faithful port of the Chartink screener. It is a momentum base-breakout \
-                     checklist rather than a shape test, so it runs alongside the geometric cup \
-                     detector instead of replacing it.",
+                    "A faithful port of the Chartink screener, and the only non-candlestick \
+                     pattern in the app. It is a momentum base-breakout checklist rather than a \
+                     shape test, which is exactly why it stayed when the geometric structures went.",
                 )
                 .small()
                 .weak(),

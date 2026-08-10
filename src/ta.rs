@@ -1,5 +1,5 @@
-//! Shared technical primitives: moving averages, volatility, trend context,
-//! swing detection and line fitting.
+//! Shared technical primitives: moving averages, RSI, ADX, trend context and
+//! line fitting.
 //!
 //! Everything here is index-based over an ascending slice of daily candles.
 //! Series-returning functions always yield one entry per input bar, using
@@ -25,21 +25,6 @@ pub fn sma(values: &[f64], period: usize) -> Vec<Option<f64>> {
     out
 }
 
-pub fn ema(values: &[f64], period: usize) -> Vec<Option<f64>> {
-    let mut out = vec![None; values.len()];
-    if period == 0 || values.len() < period {
-        return out;
-    }
-    let k = 2.0 / (period as f64 + 1.0);
-    let mut prev: f64 = values[..period].iter().sum::<f64>() / period as f64;
-    out[period - 1] = Some(prev);
-    for i in period..values.len() {
-        prev = values[i] * k + prev * (1.0 - k);
-        out[i] = Some(prev);
-    }
-    out
-}
-
 pub fn true_range(candles: &[Candle]) -> Vec<f64> {
     let mut out = Vec::with_capacity(candles.len());
     for (i, c) in candles.iter().enumerate() {
@@ -49,22 +34,6 @@ pub fn true_range(candles: &[Candle]) -> Vec<f64> {
             let pc = candles[i - 1].close;
             out.push(c.range().max((c.high - pc).abs()).max((c.low - pc).abs()));
         }
-    }
-    out
-}
-
-/// Wilder's ATR.
-pub fn atr(candles: &[Candle], period: usize) -> Vec<Option<f64>> {
-    let tr = true_range(candles);
-    let mut out = vec![None; candles.len()];
-    if period == 0 || candles.len() < period {
-        return out;
-    }
-    let mut prev = tr[..period].iter().sum::<f64>() / period as f64;
-    out[period - 1] = Some(prev);
-    for i in period..candles.len() {
-        prev = (prev * (period as f64 - 1.0) + tr[i]) / period as f64;
-        out[i] = Some(prev);
     }
     out
 }
@@ -232,12 +201,6 @@ pub fn highest_high(candles: &[Candle], from: usize, to: usize) -> f64 {
         .fold(f64::MIN, |acc, c| acc.max(c.high))
 }
 
-pub fn lowest_low(candles: &[Candle], from: usize, to: usize) -> f64 {
-    candles[from..=to.min(candles.len() - 1)]
-        .iter()
-        .fold(f64::MAX, |acc, c| acc.min(c.low))
-}
-
 // ---------------------------------------------------------------------------
 // Trend context
 // ---------------------------------------------------------------------------
@@ -291,18 +254,15 @@ pub fn trend(candles: &[Candle], i: usize) -> Trend {
 // Line fitting
 // ---------------------------------------------------------------------------
 
+/// Only `slope` is consumed today (by [`trend_before`]); the other two are part
+/// of what a least-squares fit *is* and are asserted by its test.
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub struct LineFit {
     pub slope: f64,
     pub intercept: f64,
-    /// Coefficient of determination, 0..=1. Used to reject ragged trendlines.
+    /// Coefficient of determination, 0..=1.
     pub r2: f64,
-}
-
-impl LineFit {
-    pub fn at(&self, x: f64) -> f64 {
-        self.slope * x + self.intercept
-    }
 }
 
 /// Ordinary least squares. `None` when the x values are degenerate.
@@ -339,146 +299,6 @@ pub fn linreg(xs: &[f64], ys: &[f64]) -> Option<LineFit> {
     let r2 = if ss_tot.abs() < f64::EPSILON { 1.0 } else { 1.0 - ss_res / ss_tot };
 
     Some(LineFit { slope, intercept, r2 })
-}
-
-// ---------------------------------------------------------------------------
-// Swings
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PivotKind {
-    High,
-    Low,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Pivot {
-    pub idx: usize,
-    pub price: f64,
-    pub kind: PivotKind,
-}
-
-/// Fractal pivots: a bar that dominates `left` bars behind and `right` ahead.
-///
-/// Ties are broken with `>=` on the left and `>` on the right, so a flat top
-/// yields exactly one pivot (its last bar) instead of a cluster.
-pub fn fractal_pivots(candles: &[Candle], left: usize, right: usize) -> Vec<Pivot> {
-    let mut out = Vec::new();
-    if candles.len() < left + right + 1 {
-        return out;
-    }
-    for i in left..candles.len() - right {
-        let h = candles[i].high;
-        let is_high = candles[i - left..i].iter().all(|c| h >= c.high)
-            && candles[i + 1..=i + right].iter().all(|c| h > c.high);
-        if is_high {
-            out.push(Pivot { idx: i, price: h, kind: PivotKind::High });
-        }
-
-        let l = candles[i].low;
-        let is_low = candles[i - left..i].iter().all(|c| l <= c.low)
-            && candles[i + 1..=i + right].iter().all(|c| l < c.low);
-        if is_low {
-            out.push(Pivot { idx: i, price: l, kind: PivotKind::Low });
-        }
-    }
-    out.sort_by_key(|p| p.idx);
-    out
-}
-
-/// Percentage zig-zag producing strictly alternating highs and lows.
-///
-/// Chart patterns are defined on swing structure, not on every wiggle, so this
-/// is the input the cup, double-top and triangle matchers work from.
-/// `threshold_pct` is the retracement (e.g. `0.05` for 5%) needed to confirm a
-/// swing and flip direction.
-pub fn zigzag(candles: &[Candle], threshold_pct: f64) -> Vec<Pivot> {
-    let mut out: Vec<Pivot> = Vec::new();
-    if candles.len() < 3 || threshold_pct <= 0.0 {
-        return out;
-    }
-
-    // Seed with the first bar; direction is decided by whichever extreme moves first.
-    let mut ext_idx = 0usize;
-    let mut ext_high = candles[0].high;
-    let mut ext_low = candles[0].low;
-    let mut dir: Option<PivotKind> = None;
-
-    for i in 1..candles.len() {
-        let c = candles[i];
-        match dir {
-            // Rising leg: track the high, confirm it once price drops enough.
-            Some(PivotKind::High) => {
-                if c.high >= ext_high {
-                    ext_high = c.high;
-                    ext_idx = i;
-                } else if ext_high > 0.0 && (ext_high - c.low) / ext_high >= threshold_pct {
-                    out.push(Pivot { idx: ext_idx, price: ext_high, kind: PivotKind::High });
-                    dir = Some(PivotKind::Low);
-                    ext_low = c.low;
-                    ext_idx = i;
-                }
-            }
-            // Falling leg: track the low, confirm it once price rallies enough.
-            Some(PivotKind::Low) => {
-                if c.low <= ext_low {
-                    ext_low = c.low;
-                    ext_idx = i;
-                } else if ext_low > 0.0 && (c.high - ext_low) / ext_low >= threshold_pct {
-                    out.push(Pivot { idx: ext_idx, price: ext_low, kind: PivotKind::Low });
-                    dir = Some(PivotKind::High);
-                    ext_high = c.high;
-                    ext_idx = i;
-                }
-            }
-            None => {
-                ext_high = ext_high.max(c.high);
-                ext_low = ext_low.min(c.low);
-                if ext_low > 0.0 && (c.high - ext_low) / ext_low >= threshold_pct {
-                    // Rallied off the low first: the low is the anchor pivot.
-                    let (idx, price) = seed_extreme(candles, i, PivotKind::Low);
-                    out.push(Pivot { idx, price, kind: PivotKind::Low });
-                    dir = Some(PivotKind::High);
-                    ext_high = c.high;
-                    ext_idx = i;
-                } else if ext_high > 0.0 && (ext_high - c.low) / ext_high >= threshold_pct {
-                    let (idx, price) = seed_extreme(candles, i, PivotKind::High);
-                    out.push(Pivot { idx, price, kind: PivotKind::High });
-                    dir = Some(PivotKind::Low);
-                    ext_low = c.low;
-                    ext_idx = i;
-                }
-            }
-        }
-    }
-
-    // The run in progress is a provisional pivot; patterns need it because the
-    // most interesting structures are the ones completing at the right edge.
-    if let Some(d) = dir {
-        let price = if d == PivotKind::High { ext_high } else { ext_low };
-        out.push(Pivot { idx: ext_idx, price, kind: d });
-    }
-    out
-}
-
-/// Locate the extreme bar in `0..=upto` when seeding the very first swing.
-fn seed_extreme(candles: &[Candle], upto: usize, kind: PivotKind) -> (usize, f64) {
-    let mut best_idx = 0;
-    let mut best = if kind == PivotKind::Low { f64::MAX } else { f64::MIN };
-    for (i, c) in candles[..=upto].iter().enumerate() {
-        match kind {
-            PivotKind::Low if c.low < best => {
-                best = c.low;
-                best_idx = i;
-            }
-            PivotKind::High if c.high > best => {
-                best = c.high;
-                best_idx = i;
-            }
-            _ => {}
-        }
-    }
-    (best_idx, best)
 }
 
 #[cfg(test)]
@@ -522,9 +342,8 @@ mod tests {
     fn series_functions_never_shift_indices() {
         let closes = [1.0, 2.0, 3.0, 4.0, 5.0];
         assert_eq!(sma(&closes, 3).len(), closes.len());
-        assert_eq!(ema(&closes, 3).len(), closes.len());
         assert_eq!(rsi(&closes, 3).len(), closes.len());
-        assert_eq!(atr(&from_closes(&closes), 3).len(), closes.len());
+        assert_eq!(adx(&from_closes(&closes), 3).len(), closes.len());
     }
 
     #[test]
@@ -553,31 +372,6 @@ mod tests {
         assert!((fit.slope - 3.0).abs() < 1e-9);
         assert!((fit.intercept - 7.0).abs() < 1e-9);
         assert!((fit.r2 - 1.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn fractal_pivots_find_the_peak() {
-        let c = from_closes(&[10.0, 11.0, 12.0, 15.0, 12.0, 11.0, 10.0]);
-        let pivots = fractal_pivots(&c, 2, 2);
-        let high = pivots.iter().find(|p| p.kind == PivotKind::High).unwrap();
-        assert_eq!(high.idx, 3);
-    }
-
-    #[test]
-    fn zigzag_alternates_and_captures_both_swings() {
-        // Up to 130, down to 100, back up to 140.
-        let mut closes = Vec::new();
-        closes.extend((0..10).map(|i| 100.0 + i as f64 * 3.0));
-        closes.extend((0..10).map(|i| 130.0 - i as f64 * 3.0));
-        closes.extend((0..10).map(|i| 100.0 + i as f64 * 4.0));
-        let candles = from_closes(&closes);
-
-        let pivots = zigzag(&candles, 0.05);
-        assert!(pivots.len() >= 3, "expected at least 3 swings, got {pivots:?}");
-        for pair in pivots.windows(2) {
-            assert_ne!(pair[0].kind, pair[1].kind, "pivots must alternate: {pivots:?}");
-            assert!(pair[0].idx < pair[1].idx, "pivots must advance: {pivots:?}");
-        }
     }
 
     #[test]
@@ -625,9 +419,4 @@ mod tests {
         assert_eq!(lowest_close(&candles, 0, 2), None);
     }
 
-    #[test]
-    fn zigzag_ignores_noise_below_threshold() {
-        let closes: Vec<f64> = (0..40).map(|i| 100.0 + (i % 2) as f64 * 0.3).collect();
-        assert!(zigzag(&from_closes(&closes), 0.05).len() <= 1);
-    }
 }

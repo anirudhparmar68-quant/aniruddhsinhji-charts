@@ -58,12 +58,6 @@ impl Candle {
         (self.close - self.open).abs()
     }
 
-    /// Signed body: positive on an up candle.
-    #[inline]
-    pub fn signed_body(&self) -> f64 {
-        self.close - self.open
-    }
-
     #[inline]
     pub fn range(&self) -> f64 {
         self.high - self.low
@@ -97,11 +91,6 @@ impl Candle {
     #[inline]
     pub fn is_bear(&self) -> bool {
         self.close < self.open
-    }
-
-    #[inline]
-    pub fn mid(&self) -> f64 {
-        (self.high + self.low) / 2.0
     }
 
     /// Body midpoint — used by piercing / dark-cloud style rules.

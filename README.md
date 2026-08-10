@@ -19,11 +19,15 @@ Built for **overnight/positional** work only — there is no intraday mode by de
   - **75 candlestick patterns** (the full classical set: dojis, hammers,
     engulfing, harami, stars, soldiers/crows, kickers, tasuki gaps, three
     methods, breakaways, hikkake, …)
-  - **24 chart/breakout structures**, including **cup and handle**, double and
-    triple tops/bottoms, head and shoulders, triangles, wedges, flags,
-    pennants, Darvas boxes, rounding bottoms, VCP and 52-week breakouts.
   - **Your Chartink "cup and handle breakout" scan**, ported condition for
-    condition (see below).
+    condition (see below). This is the only non-candlestick pattern in the app.
+
+  > Geometric chart-structure recognisers — cup shapes, double and triple
+  > tops/bottoms, head and shoulders, triangles, wedges, flags, pennants, Darvas
+  > boxes, rounding bottoms, VCP, base breakouts — were built, tested, and then
+  > **removed on request**. They are the family where "did it really form?" is a
+  > matter of opinion. They live in git history (`git log`), so bringing any of
+  > them back is a revert away.
 - **Scanner** — a universe-wide table that opens on **the latest candle**,
   because that is the question this tool exists to answer. Sortable by
   conviction, score, change, volume or RSI; filterable by pattern, family,
@@ -157,18 +161,9 @@ Run `--check-universe` at any time to see exactly where the numbers stand.
 
 ---
 
-## Two cup detectors, on purpose
+## The one chart pattern that stayed
 
-The scanner reports cups two different ways, and they will not always agree.
-
-**`Cup and Handle`** measures the *shape*: rim symmetry, depth, how rounded the
-base is, handle length and retracement. Its roundness test compares the gradient
-across the base against the gradient of the cup's legs — a real cup flattens out
-at the bottom while a V carries the same slope straight through the turn. A
-time-spent-near-the-low test cannot tell those apart, because a linear V spends
-proportionally just as long down there.
-
-**`Cup & Handle Breakout (Chartink)`** is a faithful port of the screener:
+**`Cup & Handle Breakout (Chartink)`** — a faithful port of the screener:
 
 ```text
 Close crossed above Max(30, 1 day ago Close)     fresh 30-day closing-high breakout
@@ -180,15 +175,14 @@ Adx(14)         >  20
 Volume          >  1.5 × Sma(Volume, 20)
 ```
 
-Worth being clear about: this second one does **not** test cup shape at all — no
-roundness, no handle, no rim symmetry. It is a momentum base-breakout checklist.
-That is a feature, not a flaw: it sidesteps the subjectivity of cup geometry by
-using conditions nobody can argue about. Keeping both means you can see what the
-shape detector catches that the checklist misses, and vice versa.
+Worth being clear about: it does **not** test cup shape at all — no roundness, no
+handle, no rim symmetry. It is a momentum base-breakout checklist. That is a
+feature, not a flaw, and it is precisely why this one survived: it sidesteps the
+subjectivity of cup geometry by using conditions nobody can argue about.
 
-Both are tunable in **Settings**; every other pattern uses fixed thresholds,
-because there is little honest disagreement about what an engulfing bar or a
-52-week breakout is.
+Its thresholds are tunable in **Settings**. Candlestick rules use fixed
+thresholds, because there is little honest disagreement about what an engulfing
+bar is.
 
 ---
 

@@ -6,7 +6,7 @@
 //! over the bar↔pixel mapping that a generic plot widget hides.
 
 use crate::model::Candle;
-use crate::patterns::types::{Detection, Direction, Family};
+use crate::patterns::types::{Detection, Direction};
 use crate::ta;
 use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 
@@ -29,7 +29,6 @@ pub struct ChartView {
     pub visible_bars: usize,
     pub show_volume: bool,
     pub show_markers: bool,
-    pub show_overlays: bool,
     pub show_ma: bool,
     /// Bar the user last hovered, for the readout strip.
     pub hovered: Option<usize>,
@@ -42,7 +41,6 @@ impl Default for ChartView {
             visible_bars: 140,
             show_volume: true,
             show_markers: true,
-            show_overlays: true,
             // Off by default: this is a price-action tool, and a clean chart is
             // worth more here than a default overlay nobody asked for.
             show_ma: false,
@@ -86,14 +84,12 @@ struct Palette {
     bull: Color32,
     bear: Color32,
     grid: Color32,
-    text: Color32,
     dim_text: Color32,
     crosshair: Color32,
     background: Color32,
     bullish_marker: Color32,
     bearish_marker: Color32,
     neutral_marker: Color32,
-    overlay: Color32,
     ma: [Color32; 3],
     last_price: Color32,
 }
@@ -105,14 +101,12 @@ impl Palette {
             bull: if dark { Color32::from_rgb(38, 166, 109) } else { Color32::from_rgb(20, 138, 84) },
             bear: if dark { Color32::from_rgb(224, 72, 84) } else { Color32::from_rgb(198, 40, 52) },
             grid: if dark { Color32::from_gray(52) } else { Color32::from_gray(222) },
-            text: ui.visuals().text_color(),
             dim_text: if dark { Color32::from_gray(150) } else { Color32::from_gray(105) },
             crosshair: if dark { Color32::from_gray(140) } else { Color32::from_gray(120) },
             background: ui.visuals().extreme_bg_color,
             bullish_marker: if dark { Color32::from_rgb(90, 210, 140) } else { Color32::from_rgb(24, 150, 92) },
             bearish_marker: if dark { Color32::from_rgb(240, 110, 120) } else { Color32::from_rgb(206, 52, 64) },
             neutral_marker: if dark { Color32::from_rgb(190, 170, 90) } else { Color32::from_rgb(160, 130, 40) },
-            overlay: if dark { Color32::from_rgb(120, 160, 235) } else { Color32::from_rgb(48, 96, 200) },
             ma: if dark {
                 [
                     Color32::from_rgb(240, 190, 90),  // 20
@@ -317,10 +311,7 @@ pub fn draw(
         }
     }
 
-    // -- pattern overlays and markers ----------------------------------------
-    if view.show_overlays {
-        draw_overlays(&painter, detections, start, end, &palette, &x_of, &y_of, candles);
-    }
+    // -- pattern markers -----------------------------------------------------
     if view.show_markers {
         draw_markers(&painter, detections, candles, start, end, &palette, &x_of, &y_of, bar_width);
     }
@@ -542,50 +533,6 @@ fn draw_markers(
             colour,
             Stroke::NONE,
         ));
-    }
-}
-
-/// Structural guides for chart patterns: a bracket spanning the formation.
-#[allow(clippy::too_many_arguments)]
-fn draw_overlays(
-    painter: &egui::Painter,
-    detections: &[Detection],
-    start: usize,
-    end: usize,
-    palette: &Palette,
-    x_of: &impl Fn(usize) -> f32,
-    y_of: &impl Fn(f64) -> f32,
-    candles: &[Candle],
-) {
-    // Only the strongest few, otherwise a busy chart becomes unreadable.
-    let mut chart_patterns: Vec<&Detection> = detections
-        .iter()
-        .filter(|d| d.kind.family() == Family::Chart && d.end >= start && d.end < end)
-        .collect();
-    chart_patterns.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-    chart_patterns.truncate(3);
-
-    for det in chart_patterns {
-        let from = det.start.max(start);
-        let to = det.end.min(end - 1);
-        if from >= to {
-            continue;
-        }
-        let high = candles[from..=to].iter().fold(f64::MIN, |a, c| a.max(c.high));
-        let low = candles[from..=to].iter().fold(f64::MAX, |a, c| a.min(c.low));
-        let (x0, x1) = (x_of(from), x_of(to));
-        let (y0, y1) = (y_of(high), y_of(low));
-
-        let stroke = Stroke::new(1.0, palette.overlay.gamma_multiply(0.75));
-        let box_rect = Rect::from_min_max(Pos2::new(x0, y0), Pos2::new(x1, y1));
-        painter.rect_stroke(box_rect, 2.0, stroke, egui::StrokeKind::Middle);
-        painter.text(
-            Pos2::new(x0 + 3.0, y0 - 2.0),
-            Align2::LEFT_BOTTOM,
-            det.kind.label(),
-            FontId::proportional(10.0),
-            palette.overlay,
-        );
     }
 }
 

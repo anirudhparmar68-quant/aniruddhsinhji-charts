@@ -169,33 +169,13 @@ patterns! {
     BullishHikkake          => ("Bullish Hikkake", Candlestick, Bullish),
     BearishHikkake          => ("Bearish Hikkake", Candlestick, Bearish),
 
-    // ---- chart / breakout structures --------------------------------------
-    CupAndHandle            => ("Cup and Handle", Chart, Bullish),
-    InverseCupAndHandle     => ("Inverse Cup and Handle", Chart, Bearish),
-    DoubleBottom            => ("Double Bottom", Chart, Bullish),
-    DoubleTop               => ("Double Top", Chart, Bearish),
-    TripleBottom            => ("Triple Bottom", Chart, Bullish),
-    TripleTop               => ("Triple Top", Chart, Bearish),
-    HeadAndShoulders        => ("Head and Shoulders", Chart, Bearish),
-    InverseHeadAndShoulders => ("Inverse Head and Shoulders", Chart, Bullish),
-    AscendingTriangle       => ("Ascending Triangle", Chart, Bullish),
-    DescendingTriangle      => ("Descending Triangle", Chart, Bearish),
-    SymmetricalTriangle     => ("Symmetrical Triangle", Chart, Neutral),
-    RisingWedge             => ("Rising Wedge", Chart, Bearish),
-    FallingWedge            => ("Falling Wedge", Chart, Bullish),
-    BullFlag                => ("Bull Flag", Chart, Bullish),
-    BearFlag                => ("Bear Flag", Chart, Bearish),
-    BullishPennant          => ("Bullish Pennant", Chart, Bullish),
-    BearishPennant          => ("Bearish Pennant", Chart, Bearish),
-    Rectangle               => ("Rectangle Range", Chart, Neutral),
-    DarvasBox               => ("Darvas Box Breakout", Chart, Bullish),
-    RoundingBottom          => ("Rounding Bottom", Chart, Bullish),
-    RoundingTop             => ("Rounding Top", Chart, Bearish),
-    VolatilityContraction   => ("Volatility Contraction (VCP)", Chart, Bullish),
-    FlatBaseBreakout        => ("Flat Base Breakout", Chart, Bullish),
-    FiftyTwoWeekBreakout    => ("52-Week High Breakout", Chart, Bullish),
-
     // ---- screener scans ported from the user's Chartink setups -------------
+    //
+    // The only non-candlestick entry. The geometric chart-structure recognisers
+    // (cup shapes, double tops, head and shoulders, triangles, wedges, flags,
+    // Darvas boxes, VCP, rounding bottoms, base breakouts) were removed on
+    // request — they are the family where "did it really form?" is a matter of
+    // opinion, and this scan answers the same question with rules that are not.
     ChartinkCupBreakout     => ("Cup & Handle Breakout (Chartink)", Chart, Bullish),
 }
 
@@ -266,8 +246,16 @@ mod tests {
     }
 
     #[test]
-    fn catalogue_covers_both_families() {
-        assert!(PatternKind::ALL.iter().filter(|k| k.family() == Candlestick).count() > 50);
-        assert!(PatternKind::ALL.iter().filter(|k| k.family() == Chart).count() > 20);
+    fn catalogue_is_candlesticks_plus_the_chartink_scan() {
+        let candles = PatternKind::ALL.iter().filter(|k| k.family() == Candlestick).count();
+        let chart = PatternKind::ALL.iter().filter(|k| k.family() == Chart).count();
+        assert!(candles > 50, "the full classical candlestick set should still be here");
+        // Geometric structures were removed on request; only the Chartink scan
+        // remains outside the candlestick family.
+        assert_eq!(chart, 1);
+        assert_eq!(
+            PatternKind::ALL.iter().find(|k| k.family() == Chart),
+            Some(&PatternKind::ChartinkCupBreakout)
+        );
     }
 }

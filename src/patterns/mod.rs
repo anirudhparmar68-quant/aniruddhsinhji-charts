@@ -1,6 +1,5 @@
 //! Pattern recognition: Japanese candlesticks and multi-week chart structures.
 
-pub mod breakout;
 pub mod candlesticks;
 pub mod scans;
 pub mod types;
@@ -11,14 +10,12 @@ use types::Detection;
 
 /// Tunables for the recognisers that genuinely need them.
 ///
-/// Candlestick rules and most chart structures use fixed thresholds — there is
-/// little honest disagreement about what an engulfing bar or a 52-week
-/// breakout is. Cups and screener scans are where traders differ, so those get
-/// knobs and everything else stays out of the settings file.
+/// Candlestick rules use fixed thresholds — there is little honest disagreement
+/// about what an engulfing bar is. Screener scans are where traders differ, so
+/// those get knobs and nothing else clutters the settings file.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PatternParams {
-    pub cup: breakout::CupParams,
     pub chartink: scans::CupBreakoutParams,
 }
 
@@ -29,7 +26,6 @@ pub struct PatternParams {
 /// user wants one row per pattern occurrence, not one per window that saw it.
 pub fn detect_all(candles: &[Candle], params: &PatternParams) -> Vec<Detection> {
     let mut all = candlesticks::detect(candles);
-    all.extend(breakout::detect(candles, &params.cup));
     all.extend(scans::cup_breakout(candles, &params.chartink));
 
     all.sort_by(|a, b| {
@@ -46,12 +42,6 @@ pub fn detect_all(candles: &[Candle], params: &PatternParams) -> Vec<Detection> 
             .then(b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal))
     });
     all
-}
-
-/// Detections that finish at or after `from_index` — the "what fired recently"
-/// view the scanner and the chart's marker layer both want.
-pub fn recent(detections: &[Detection], from_index: usize) -> Vec<Detection> {
-    detections.iter().filter(|d| d.end >= from_index).cloned().collect()
 }
 
 #[cfg(test)]
@@ -99,11 +89,15 @@ mod tests {
     }
 
     #[test]
-    fn recent_filters_by_bar_index() {
-        let c = candles(220);
-        let all = detect_all(&c, &PatternParams::default());
-        let tail = recent(&all, 210);
-        assert!(tail.iter().all(|d| d.end >= 210));
-        assert!(tail.len() <= all.len());
+    fn only_candlesticks_and_the_chartink_scan_are_produced() {
+        use types::{Family, PatternKind};
+        let dets = detect_all(&candles(220), &PatternParams::default());
+        for d in &dets {
+            assert!(
+                d.kind.family() == Family::Candlestick || d.kind == PatternKind::ChartinkCupBreakout,
+                "geometric chart structures were removed, but {:?} appeared",
+                d.kind
+            );
+        }
     }
 }

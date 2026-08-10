@@ -433,12 +433,12 @@ mod tests {
         )
         .unwrap();
 
-        let det = Detection::new(PatternKind::CupAndHandle, 0, 2, 0.8).with_detail("depth 20%");
+        let det = Detection::new(PatternKind::ChartinkCupBreakout, 0, 2, 0.8).with_detail("depth 20%");
         replace_detections(&mut conn, "NSE_EQ|X", &candles, &[det]).unwrap();
 
         let found = detections_since(&conn, NaiveDate::from_ymd_opt(2025, 8, 1).unwrap()).unwrap();
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].kind, PatternKind::CupAndHandle);
+        assert_eq!(found[0].kind, PatternKind::ChartinkCupBreakout);
         assert_eq!(found[0].symbol, "XCO");
         assert_eq!(found[0].date, NaiveDate::from_ymd_opt(2025, 8, 3).unwrap());
         assert_eq!(found[0].start_date, NaiveDate::from_ymd_opt(2025, 8, 1).unwrap());
