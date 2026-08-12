@@ -1,7 +1,22 @@
+[workspace]
+members = ["spider-ui/src-tauri"]
+
 [package]
 name = "spider_charts"
 version = "0.1.0"
 edition = "2024"
+
+# The engine is the library; egui is only needed by the desktop binary. Keeping
+# it optional means the Tauri front end does not drag a second GUI toolkit —
+# and its OpenGL stack — into a build that will never open an egui window.
+[features]
+default = ["desktop"]
+desktop = ["dep:eframe", "dep:egui"]
+
+[[bin]]
+name = "spider_charts"
+path = "src/main.rs"
+required-features = ["desktop"]
 
 [dependencies]
 anyhow = "1.0.104"
@@ -13,8 +28,8 @@ dotenvy = "0.15.7"
 # selected at runtime: wgpu's adapter initialisation segfaults on this machine
 # (exit 0xC0000005 before any Rust code runs), while OpenGL is universally
 # available on Windows. See `Renderer::Glow` in main.rs.
-eframe = { version = "0.36.1", features = ["glow"] }
-egui = "0.36.1"
+eframe = { version = "0.36.1", features = ["glow"], optional = true }
+egui = { version = "0.36.1", optional = true }
 env_logger = "0.11.11"
 flate2 = "1"
 futures = "0.3.33"
@@ -34,7 +49,6 @@ zip = "8.6.0"
 opt-level = 3
 lto = "thin"
 codegen-units = 1
-panic = "abort"
 
 # Dependencies stay optimised even in dev builds so scans/charts never feel slow.
 [profile.dev.package."*"]

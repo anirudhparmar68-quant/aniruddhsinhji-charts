@@ -1,9 +1,9 @@
 //! The eframe application: stock list, chart, scanner and settings.
 
-use crate::config::Settings;
-use crate::model::Instrument;
-use crate::patterns::types::{Detection, Direction, Family, PatternKind};
-use crate::sync::{self, Command, Event, Worker};
+use spider_charts::config::Settings;
+use spider_charts::model::Instrument;
+use spider_charts::patterns::types::{Detection, Direction, Family, PatternKind};
+use spider_charts::sync::{self, Command, Event, Worker};
 use crate::ui::chart::{self, ChartView};
 use chrono::{Duration, NaiveDate};
 use egui::{Color32, RichText};
@@ -1395,7 +1395,7 @@ impl SpiderApp {
                 self.settings_draft = self.settings.clone();
             }
             if ui.button("Re-login to Upstox").clicked() {
-                crate::upstox::auth::clear_cached_token();
+                spider_charts::upstox::auth::clear_cached_token();
                 self.send(Command::Login);
             }
         });
@@ -1488,7 +1488,7 @@ fn conviction_colour(conviction: f64) -> Color32 {
 
 /// Write the Today list to `data/today_export.csv`.
 fn export_today_csv(rows: &[TodayRow], latest: NaiveDate) -> anyhow::Result<String> {
-    let path = crate::config::data_dir().join("today_export.csv");
+    let path = spider_charts::config::data_dir().join("today_export.csv");
     let mut out = String::from(
         "session,symbol,name,total,bullish,bearish,neutral,best_score,conviction,\
          close,change_pct,volume_ratio,rsi,patterns\n",
@@ -1522,7 +1522,7 @@ fn csv_quote(value: &str) -> String {
 
 /// Write the current scanner view to `data/scan_export.csv`.
 fn export_scan_csv(rows: &[ScanDisplayRow]) -> anyhow::Result<String> {
-    let path = crate::config::data_dir().join("scan_export.csv");
+    let path = spider_charts::config::data_dir().join("scan_export.csv");
     let mut out = String::from(
         "date,symbol,name,pattern,bias,score,change_pct,volume_ratio,rsi,below_52w_pct,conviction,detail\n",
     );
@@ -1582,7 +1582,7 @@ pub fn scanner_cutoff(today: NaiveDate, days: i64) -> NaiveDate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::Exchange;
+    use spider_charts::model::Exchange;
 
     #[test]
     fn volume_formatting_uses_indian_units() {
@@ -1690,3 +1690,4 @@ mod tests {
         assert_eq!(scanner_cutoff(today, 0), today);
     }
 }
+

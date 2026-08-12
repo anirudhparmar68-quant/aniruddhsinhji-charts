@@ -10,17 +10,11 @@
 //!   spider_charts.exe            desktop app
 //!   spider_charts.exe --sync     headless full sync, for a nightly scheduled task
 
-mod bhavcopy;
-mod config;
-mod model;
-mod patterns;
-mod store;
-mod sync;
-mod ta;
+// The engine is a library so more than one front end can sit on it; this
+// binary is the egui desktop app, and `ui` is the only module it owns.
+use spider_charts::{config, sync};
+
 mod ui;
-mod universe;
-mod upstox;
-mod writelock;
 
 use anyhow::Result;
 

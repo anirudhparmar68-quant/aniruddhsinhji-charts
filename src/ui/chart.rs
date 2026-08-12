@@ -5,9 +5,9 @@
 //! the cursor, pattern overlays anchored to specific bars — all need control
 //! over the bar↔pixel mapping that a generic plot widget hides.
 
-use crate::model::Candle;
-use crate::patterns::types::{Detection, Direction};
-use crate::ta;
+use spider_charts::model::Candle;
+use spider_charts::patterns::types::{Detection, Direction};
+use spider_charts::ta;
 use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 
 const MIN_VISIBLE_BARS: usize = 15;
@@ -639,3 +639,4 @@ mod tests {
         assert_eq!(v.first_visible, 0);
     }
 }
+
