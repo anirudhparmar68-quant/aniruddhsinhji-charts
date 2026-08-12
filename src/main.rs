@@ -42,6 +42,13 @@ fn main() -> Result<()> {
         return runtime.block_on(sync::run_headless(settings));
     }
 
+    // Daily catch-up straight from the exchanges. No broker token involved, so
+    // this is the one a scheduled job should run.
+    if std::env::args().any(|a| a == "--tail" || a == "-t") {
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+        return runtime.block_on(sync::run_tail(settings));
+    }
+
     // Read-only diagnostic: builds the universe from public sources only.
     if std::env::args().any(|a| a == "--check-universe") {
         let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;

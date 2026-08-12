@@ -375,7 +375,17 @@ impl SpiderApp {
                     if ui.button("Universe").on_hover_text("Refresh the NSE + BSE list and market caps").clicked() {
                         self.send(Command::RefreshUniverse);
                     }
-                    if ui.button("History").on_hover_text("Download only the missing sessions").clicked() {
+                    if ui
+                        .button("Update")
+                        .on_hover_text(
+                            "Catch up on the newest sessions from the NSE + BSE bhavcopy, then \
+                             rescan. No Upstox login needed — this is the everyday button.",
+                        )
+                        .clicked()
+                    {
+                        self.send(Command::TailUpdate);
+                    }
+                    if ui.button("History").on_hover_text("Re-download daily history from Upstox").clicked() {
                         self.send(Command::Backfill);
                     }
                     if ui.button("Rescan").on_hover_text("Re-run every pattern over stored data").clicked() {

@@ -176,6 +176,9 @@ pub enum Command {
     LoadFromDisk,
     /// Refresh → backfill → scan, in order.
     FullSync,
+    /// Bring the newest sessions up to date from bhavcopy alone, then rescan.
+    /// Needs no Upstox token, so it never has to open a browser.
+    TailUpdate,
     /// Replace the worker's copy after the user edits settings. Without this the
     /// worker would keep scanning with whatever was loaded at start-up.
     UpdateSettings(Box<Settings>),
@@ -323,6 +326,11 @@ impl WorkerCtx {
                         self.fail("full sync", e);
                     }
                 }
+                Command::TailUpdate => {
+                    if let Err(e) = self.tail_update().await {
+                        self.fail("tail update", e);
+                    }
+                }
                 Command::UpdateSettings(settings) => {
                     self.settings = *settings;
                     self.status("Settings applied — rescan to see them take effect");
@@ -347,6 +355,29 @@ impl WorkerCtx {
         } else {
             self.status("Sync complete");
         }
+        Ok(())
+    }
+
+    /// Catch up on the newest sessions using only the exchanges' bhavcopy.
+    ///
+    /// The Upstox token dies at 03:30 IST every day and renewing it means a
+    /// browser. A daily update should never need that — and it does not, because
+    /// bhavcopy is public. Upstox is only required to *build* history; keeping
+    /// it current is the exchanges' own files.
+    async fn tail_update(&mut self) -> Result<()> {
+        let targets: Vec<Instrument> = snapshot(&self.state).instruments.as_ref().clone();
+        if targets.is_empty() {
+            self.status("No instruments known yet — run a Full sync first.");
+            return Ok(());
+        }
+
+        let written = self.bhavcopy_topup(&targets, today_ist()).await?;
+        self.load_from_disk()?;
+        self.scan_all()?;
+
+        let conn = store::open()?;
+        store::set_meta(&conn, "last_sync", &Utc::now().to_rfc3339())?;
+        self.status(format!("Tail update complete — {written} bars refreshed"));
         Ok(())
     }
 
@@ -904,7 +935,8 @@ pub async fn run_universe_check(settings: Settings) -> Result<()> {
 }
 
 /// Headless full sync, for running nightly from Task Scheduler.
-pub async fn run_headless(settings: Settings) -> Result<()> {
+/// A worker wired to a stdout + file logger, for the two headless modes.
+fn headless_ctx(settings: Settings) -> WorkerCtx {
     let (evt_tx, evt_rx) = std::sync::mpsc::channel::<Event>();
     std::thread::spawn(move || {
         // Release builds have no console, so a scheduled nightly run would
@@ -934,16 +966,32 @@ pub async fn run_headless(settings: Settings) -> Result<()> {
         }
     });
 
-    let mut ctx = WorkerCtx {
+    WorkerCtx {
         client: http_client(),
         token: None,
         settings,
         state: Arc::new(RwLock::new(Arc::new(Shared::default()))),
         events: evt_tx,
         last_failed: 0,
-    };
+    }
+}
+
+/// Full sync: instrument master, market caps, Upstox history, bhavcopy tail,
+/// scan. Needs a valid Upstox token and will open a browser without one.
+pub async fn run_headless(settings: Settings) -> Result<()> {
+    let mut ctx = headless_ctx(settings);
     ctx.load_from_disk()?;
     ctx.full_sync().await
+}
+
+/// Daily update: newest sessions from bhavcopy, then rescan.
+///
+/// This is what a scheduled job should run. It touches no broker API, so it
+/// cannot be blocked by an expired token or stall waiting on a login window.
+pub async fn run_tail(settings: Settings) -> Result<()> {
+    let mut ctx = headless_ctx(settings);
+    ctx.load_from_disk()?;
+    ctx.tail_update().await
 }
 
 #[cfg(test)]
