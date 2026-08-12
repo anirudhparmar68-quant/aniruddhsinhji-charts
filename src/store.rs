@@ -337,7 +337,8 @@ pub fn detections_since(conn: &Connection, since: NaiveDate) -> Result<Vec<Store
                 start_date: start_date
                     .parse()
                     .unwrap_or_else(|_| NaiveDate::from_ymd_opt(1970, 1, 1).unwrap()),
-                kind: PatternKind::Doji, // replaced below; placeholder keeps the row shape
+                // Replaced below from the stored key; this only keeps the row shape.
+                kind: PatternKind::ChartinkCupBreakout,
                 direction: Direction::parse(&direction),
                 score: row.get(6)?,
                 detail: row.get(7)?,
@@ -496,23 +497,26 @@ mod tests {
         )
         .unwrap();
 
+        // A rescan must replace, not accumulate: same instrument, same kind,
+        // different bar — only the newer detection should survive.
         replace_detections(
             &mut conn,
             "NSE_EQ|X",
             &candles,
-            &[Detection::new(PatternKind::Doji, 0, 0, 0.6)],
+            &[Detection::new(PatternKind::ChartinkCupBreakout, 0, 0, 0.6)],
         )
         .unwrap();
         replace_detections(
             &mut conn,
             "NSE_EQ|X",
             &candles,
-            &[Detection::new(PatternKind::Hammer, 1, 1, 0.7)],
+            &[Detection::new(PatternKind::ChartinkCupBreakout, 1, 1, 0.7)],
         )
         .unwrap();
 
         let found = detections_since(&conn, NaiveDate::from_ymd_opt(2025, 1, 1).unwrap()).unwrap();
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].kind, PatternKind::Hammer);
+        assert_eq!(found[0].score, 0.7);
+        assert_eq!(found[0].date, NaiveDate::from_ymd_opt(2025, 8, 2).unwrap());
     }
 }

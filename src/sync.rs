@@ -11,6 +11,7 @@ use crate::patterns::types::{Detection, Direction};
 use crate::store;
 use crate::universe::{self, MarketCaps, UniverseStats};
 use crate::upstox::{auth, history, instruments as instr, http_client};
+use crate::writelock::WriteLock;
 use anyhow::Result;
 use chrono::{Duration, FixedOffset, NaiveDate, Utc};
 use futures::stream::{self, StreamExt};
@@ -22,6 +23,29 @@ use std::sync::{Arc, RwLock};
 /// Overlap re-requested on every top-up. Wide on purpose — see the note in
 /// `backfill`; narrow tail requests come back stale.
 const TAIL_OVERLAP_DAYS: i64 = 30;
+
+/// How long a write operation waits for another process to finish before
+/// giving up. Generous: a full backfill is minutes, and a scheduled run that
+/// waits is far better than one that collides.
+const WRITE_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(20 * 60);
+
+/// The app's own startup scan waits only briefly: whatever is on disk is
+/// already displayable, so blocking the window for twenty minutes to redo a
+/// scan somebody else is doing would be the wrong trade.
+const STARTUP_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// Commands that rewrite the database and therefore need the cross-process lock.
+fn rewrites_database(cmd: &Command) -> bool {
+    matches!(
+        cmd,
+        Command::RefreshUniverse
+            | Command::Backfill
+            | Command::ScanAll
+            | Command::ScanOne(_)
+            | Command::FullSync
+            | Command::TailUpdate
+    )
+}
 
 /// Calendar days of tail re-taken from the exchanges' own bhavcopy files after
 /// every backfill. Ten covers a long weekend plus a holiday and still costs
@@ -283,12 +307,48 @@ impl WorkerCtx {
         // the current settings rather than whatever they were last night.
         if let Err(e) = self.load_from_disk() {
             self.fail("loading cached data", e);
-        } else if let Err(e) = self.scan_all() {
-            self.fail("scanning cached data", e);
+        } else {
+            match WriteLock::acquire(STARTUP_LOCK_WAIT, "desktop app startup") {
+                Ok(Some(_lock)) => {
+                    if let Err(e) = self.scan_all() {
+                        self.fail("scanning cached data", e);
+                    }
+                }
+                // Whatever is on disk is already loaded and displayable.
+                Ok(None) => self.status(
+                    "Another process is updating the database — showing the last saved scan.",
+                ),
+                Err(e) => self.fail("taking the write lock", e),
+            }
         }
 
         while let Ok(cmd) = commands.recv() {
             let _ = self.events.send(Event::Busy(true));
+
+            // One writer at a time across processes — the nightly job runs
+            // whether or not this window is open.
+            let lock = if rewrites_database(&cmd) {
+                match WriteLock::acquire(WRITE_LOCK_WAIT, "desktop app") {
+                    Ok(Some(lock)) => Some(lock),
+                    Ok(None) => {
+                        let _ = self.events.send(Event::Error(
+                            "Another Spider Charts process is updating the database. \
+                             Nothing was changed — try again once it finishes."
+                                .to_string(),
+                        ));
+                        let _ = self.events.send(Event::Busy(false));
+                        continue;
+                    }
+                    Err(e) => {
+                        self.fail("taking the write lock", e);
+                        let _ = self.events.send(Event::Busy(false));
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
+
             match cmd {
                 Command::Shutdown => break,
                 Command::Login => {
@@ -336,6 +396,7 @@ impl WorkerCtx {
                     self.status("Settings applied — rescan to see them take effect");
                 }
             }
+            drop(lock);
             let _ = self.events.send(Event::Busy(false));
         }
     }
@@ -986,6 +1047,10 @@ fn headless_ctx(settings: Settings) -> WorkerCtx {
 /// scan. Needs a valid Upstox token and will open a browser without one.
 pub async fn run_headless(settings: Settings) -> Result<()> {
     let mut ctx = headless_ctx(settings);
+    let Some(_lock) = WriteLock::acquire(WRITE_LOCK_WAIT, "--sync")? else {
+        ctx.status("Another Spider Charts process is writing — skipping this run.");
+        return Ok(());
+    };
     ctx.load_from_disk()?;
     ctx.full_sync().await
 }
@@ -996,6 +1061,12 @@ pub async fn run_headless(settings: Settings) -> Result<()> {
 /// cannot be blocked by an expired token or stall waiting on a login window.
 pub async fn run_tail(settings: Settings) -> Result<()> {
     let mut ctx = headless_ctx(settings);
+    // Waits rather than fails: a scheduled run that starts twenty minutes late
+    // is fine, one that collides with the open app is not.
+    let Some(_lock) = WriteLock::acquire(WRITE_LOCK_WAIT, "--tail")? else {
+        ctx.status("Another Spider Charts process is writing — skipping this run.");
+        return Ok(());
+    };
     ctx.load_from_disk()?;
     ctx.tail_update().await
 }

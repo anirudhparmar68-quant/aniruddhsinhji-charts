@@ -1,5 +1,4 @@
-//! Shared technical primitives: moving averages, RSI, ADX, trend context and
-//! line fitting.
+//! Shared technical primitives: moving averages, RSI, ADX and rolling extremes.
 //!
 //! Everything here is index-based over an ascending slice of daily candles.
 //! Series-returning functions always yield one entry per input bar, using
@@ -159,33 +158,6 @@ pub fn lowest_close(candles: &[Candle], i: usize, window: usize) -> Option<f64> 
     Some(candles[i + 1 - window..=i].iter().fold(f64::MAX, |a, c| a.min(c.close)))
 }
 
-// ---------------------------------------------------------------------------
-// Local statistics used by the candlestick rules
-// ---------------------------------------------------------------------------
-
-/// Mean body size of the `lookback` bars *before* `i`. Candlestick rules are
-/// relative ("a long body"), so they need a local yardstick rather than an
-/// absolute rupee amount.
-pub fn avg_body_before(candles: &[Candle], i: usize, lookback: usize) -> f64 {
-    let start = i.saturating_sub(lookback);
-    let slice = &candles[start..i];
-    if slice.is_empty() {
-        return candles[i].body().max(f64::EPSILON);
-    }
-    let mean = slice.iter().map(|c| c.body()).sum::<f64>() / slice.len() as f64;
-    mean.max(f64::EPSILON)
-}
-
-pub fn avg_range_before(candles: &[Candle], i: usize, lookback: usize) -> f64 {
-    let start = i.saturating_sub(lookback);
-    let slice = &candles[start..i];
-    if slice.is_empty() {
-        return candles[i].range().max(f64::EPSILON);
-    }
-    let mean = slice.iter().map(|c| c.range()).sum::<f64>() / slice.len() as f64;
-    mean.max(f64::EPSILON)
-}
-
 pub fn avg_volume_before(candles: &[Candle], i: usize, lookback: usize) -> f64 {
     let start = i.saturating_sub(lookback);
     let slice = &candles[start..i];
@@ -199,106 +171,6 @@ pub fn highest_high(candles: &[Candle], from: usize, to: usize) -> f64 {
     candles[from..=to.min(candles.len() - 1)]
         .iter()
         .fold(f64::MIN, |acc, c| acc.max(c.high))
-}
-
-// ---------------------------------------------------------------------------
-// Trend context
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Trend {
-    Up,
-    Down,
-    Side,
-}
-
-/// Trend of the `lookback` bars ending just before `i`.
-///
-/// Reversal candlesticks are only meaningful against a prior move — a hammer in
-/// a sideways drift is noise. We fit a line to the closes and express its total
-/// rise over the window as a fraction of the mean price, which keeps the
-/// threshold comparable across a ₹20 stock and a ₹20,000 one.
-pub fn trend_before(candles: &[Candle], i: usize, lookback: usize, threshold: f64) -> Trend {
-    if i == 0 || lookback < 3 {
-        return Trend::Side;
-    }
-    let start = i.saturating_sub(lookback);
-    let closes: Vec<f64> = candles[start..i].iter().map(|c| c.close).collect();
-    if closes.len() < 3 {
-        return Trend::Side;
-    }
-    let xs: Vec<f64> = (0..closes.len()).map(|x| x as f64).collect();
-    let Some(fit) = linreg(&xs, &closes) else { return Trend::Side };
-
-    let mean = closes.iter().sum::<f64>() / closes.len() as f64;
-    if mean <= 0.0 {
-        return Trend::Side;
-    }
-    let total_move = fit.slope * (closes.len() - 1) as f64 / mean;
-
-    if total_move > threshold {
-        Trend::Up
-    } else if total_move < -threshold {
-        Trend::Down
-    } else {
-        Trend::Side
-    }
-}
-
-/// Default trend context: 10 bars, 3% net move.
-pub fn trend(candles: &[Candle], i: usize) -> Trend {
-    trend_before(candles, i, 10, 0.03)
-}
-
-// ---------------------------------------------------------------------------
-// Line fitting
-// ---------------------------------------------------------------------------
-
-/// Only `slope` is consumed today (by [`trend_before`]); the other two are part
-/// of what a least-squares fit *is* and are asserted by its test.
-#[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
-pub struct LineFit {
-    pub slope: f64,
-    pub intercept: f64,
-    /// Coefficient of determination, 0..=1.
-    pub r2: f64,
-}
-
-/// Ordinary least squares. `None` when the x values are degenerate.
-pub fn linreg(xs: &[f64], ys: &[f64]) -> Option<LineFit> {
-    let n = xs.len();
-    if n < 2 || n != ys.len() {
-        return None;
-    }
-    let nf = n as f64;
-    let mean_x = xs.iter().sum::<f64>() / nf;
-    let mean_y = ys.iter().sum::<f64>() / nf;
-
-    let mut sxx = 0.0;
-    let mut sxy = 0.0;
-    for k in 0..n {
-        let dx = xs[k] - mean_x;
-        sxx += dx * dx;
-        sxy += dx * (ys[k] - mean_y);
-    }
-    if sxx.abs() < f64::EPSILON {
-        return None;
-    }
-    let slope = sxy / sxx;
-    let intercept = mean_y - slope * mean_x;
-
-    let mut ss_res = 0.0;
-    let mut ss_tot = 0.0;
-    for k in 0..n {
-        let pred = slope * xs[k] + intercept;
-        ss_res += (ys[k] - pred).powi(2);
-        ss_tot += (ys[k] - mean_y).powi(2);
-    }
-    // A perfectly flat series has no variance to explain; treat it as a clean fit.
-    let r2 = if ss_tot.abs() < f64::EPSILON { 1.0 } else { 1.0 - ss_res / ss_tot };
-
-    Some(LineFit { slope, intercept, r2 })
 }
 
 #[cfg(test)]
@@ -350,28 +222,6 @@ mod tests {
     fn rsi_is_100_when_only_gains() {
         let out = rsi(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], 3);
         assert_eq!(out[3], Some(100.0));
-    }
-
-    #[test]
-    fn trend_detects_direction() {
-        let up = from_closes(&[100.0, 102.0, 104.0, 106.0, 108.0, 110.0, 112.0, 114.0]);
-        assert_eq!(trend_before(&up, 7, 7, 0.03), Trend::Up);
-
-        let down = from_closes(&[114.0, 112.0, 110.0, 108.0, 106.0, 104.0, 102.0, 100.0]);
-        assert_eq!(trend_before(&down, 7, 7, 0.03), Trend::Down);
-
-        let flat = from_closes(&[100.0, 100.4, 99.8, 100.2, 100.0, 99.9, 100.1, 100.0]);
-        assert_eq!(trend_before(&flat, 7, 7, 0.03), Trend::Side);
-    }
-
-    #[test]
-    fn linreg_recovers_a_known_line() {
-        let xs: Vec<f64> = (0..10).map(|i| i as f64).collect();
-        let ys: Vec<f64> = xs.iter().map(|x| 3.0 * x + 7.0).collect();
-        let fit = linreg(&xs, &ys).unwrap();
-        assert!((fit.slope - 3.0).abs() < 1e-9);
-        assert!((fit.intercept - 7.0).abs() < 1e-9);
-        assert!((fit.r2 - 1.0).abs() < 1e-9);
     }
 
     #[test]

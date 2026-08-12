@@ -20,6 +20,7 @@ mod ta;
 mod ui;
 mod universe;
 mod upstox;
+mod writelock;
 
 use anyhow::Result;
 

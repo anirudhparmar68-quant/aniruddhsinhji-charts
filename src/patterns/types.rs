@@ -31,25 +31,26 @@ impl Direction {
     }
 }
 
+/// Kept as a one-variant enum rather than deleted: it is what the storage
+/// layer and the scanner's grouping are written against, and the catalogue has
+/// carried several families before. Adding one back should not be a refactor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Family {
-    /// One to five bar Japanese candlestick formations.
-    Candlestick,
-    /// Multi-week price structures: bases, reversals, continuations.
+    /// Screener-style rule sets evaluated per bar.
     Chart,
 }
 
 impl Family {
     pub fn as_str(self) -> &'static str {
         match self {
-            Family::Candlestick => "Candlestick",
             Family::Chart => "Chart",
         }
     }
 }
 
+#[allow(unused_imports)]
 use Direction::{Bearish, Bullish, Neutral};
-use Family::{Candlestick, Chart};
+use Family::Chart;
 
 macro_rules! patterns {
     ($( $variant:ident => ($label:expr, $family:expr, $dir:expr) ),* $(,)?) => {
@@ -87,96 +88,11 @@ macro_rules! patterns {
 }
 
 patterns! {
-    // ---- single candle -----------------------------------------------------
-    Doji                    => ("Doji", Candlestick, Neutral),
-    LongLeggedDoji          => ("Long-Legged Doji", Candlestick, Neutral),
-    DragonflyDoji           => ("Dragonfly Doji", Candlestick, Bullish),
-    GravestoneDoji          => ("Gravestone Doji", Candlestick, Bearish),
-    FourPriceDoji           => ("Four Price Doji", Candlestick, Neutral),
-    Hammer                  => ("Hammer", Candlestick, Bullish),
-    InvertedHammer          => ("Inverted Hammer", Candlestick, Bullish),
-    HangingMan              => ("Hanging Man", Candlestick, Bearish),
-    ShootingStar            => ("Shooting Star", Candlestick, Bearish),
-    BullishMarubozu         => ("Bullish Marubozu", Candlestick, Bullish),
-    BearishMarubozu         => ("Bearish Marubozu", Candlestick, Bearish),
-    SpinningTop             => ("Spinning Top", Candlestick, Neutral),
-    HighWave                => ("High Wave", Candlestick, Neutral),
-    BullishBeltHold         => ("Bullish Belt Hold", Candlestick, Bullish),
-    BearishBeltHold         => ("Bearish Belt Hold", Candlestick, Bearish),
-
-    // ---- two candles -------------------------------------------------------
-    BullishEngulfing        => ("Bullish Engulfing", Candlestick, Bullish),
-    BearishEngulfing        => ("Bearish Engulfing", Candlestick, Bearish),
-    BullishHarami           => ("Bullish Harami", Candlestick, Bullish),
-    BearishHarami           => ("Bearish Harami", Candlestick, Bearish),
-    BullishHaramiCross      => ("Bullish Harami Cross", Candlestick, Bullish),
-    BearishHaramiCross      => ("Bearish Harami Cross", Candlestick, Bearish),
-    PiercingLine            => ("Piercing Line", Candlestick, Bullish),
-    DarkCloudCover          => ("Dark Cloud Cover", Candlestick, Bearish),
-    TweezerBottom           => ("Tweezer Bottom", Candlestick, Bullish),
-    TweezerTop              => ("Tweezer Top", Candlestick, Bearish),
-    BullishKicker           => ("Bullish Kicker", Candlestick, Bullish),
-    BearishKicker           => ("Bearish Kicker", Candlestick, Bearish),
-    BullishSeparatingLines  => ("Bullish Separating Lines", Candlestick, Bullish),
-    BearishSeparatingLines  => ("Bearish Separating Lines", Candlestick, Bearish),
-    MatchingLow             => ("Matching Low", Candlestick, Bullish),
-    MatchingHigh            => ("Matching High", Candlestick, Bearish),
-    OnNeck                  => ("On-Neck Line", Candlestick, Bearish),
-    InNeck                  => ("In-Neck Line", Candlestick, Bearish),
-    Thrusting               => ("Thrusting Line", Candlestick, Bearish),
-    BullishCounterattack    => ("Bullish Counterattack", Candlestick, Bullish),
-    BearishCounterattack    => ("Bearish Counterattack", Candlestick, Bearish),
-    HomingPigeon            => ("Homing Pigeon", Candlestick, Bullish),
-    DescendingHawk          => ("Descending Hawk", Candlestick, Bearish),
-
-    // ---- three candles -----------------------------------------------------
-    MorningStar             => ("Morning Star", Candlestick, Bullish),
-    EveningStar             => ("Evening Star", Candlestick, Bearish),
-    MorningDojiStar         => ("Morning Doji Star", Candlestick, Bullish),
-    EveningDojiStar         => ("Evening Doji Star", Candlestick, Bearish),
-    BullishAbandonedBaby    => ("Bullish Abandoned Baby", Candlestick, Bullish),
-    BearishAbandonedBaby    => ("Bearish Abandoned Baby", Candlestick, Bearish),
-    ThreeWhiteSoldiers      => ("Three White Soldiers", Candlestick, Bullish),
-    ThreeBlackCrows         => ("Three Black Crows", Candlestick, Bearish),
-    IdenticalThreeCrows     => ("Identical Three Crows", Candlestick, Bearish),
-    ThreeInsideUp           => ("Three Inside Up", Candlestick, Bullish),
-    ThreeInsideDown         => ("Three Inside Down", Candlestick, Bearish),
-    ThreeOutsideUp          => ("Three Outside Up", Candlestick, Bullish),
-    ThreeOutsideDown        => ("Three Outside Down", Candlestick, Bearish),
-    BullishTriStar          => ("Bullish Tri-Star", Candlestick, Bullish),
-    BearishTriStar          => ("Bearish Tri-Star", Candlestick, Bearish),
-    StickSandwich           => ("Stick Sandwich", Candlestick, Bullish),
-    UniqueThreeRiverBottom  => ("Unique Three River Bottom", Candlestick, Bullish),
-    ThreeStarsInTheSouth    => ("Three Stars in the South", Candlestick, Bullish),
-    AdvanceBlock            => ("Advance Block", Candlestick, Bearish),
-    Deliberation            => ("Deliberation", Candlestick, Bearish),
-    TwoCrows                => ("Two Crows", Candlestick, Bearish),
-    UpsideGapTwoCrows       => ("Upside Gap Two Crows", Candlestick, Bearish),
-    BullishTasukiGap        => ("Upside Tasuki Gap", Candlestick, Bullish),
-    BearishTasukiGap        => ("Downside Tasuki Gap", Candlestick, Bearish),
-    SideBySideWhiteLines    => ("Side-by-Side White Lines", Candlestick, Bullish),
-
-    // ---- four and five candles --------------------------------------------
-    RisingThreeMethods      => ("Rising Three Methods", Candlestick, Bullish),
-    FallingThreeMethods     => ("Falling Three Methods", Candlestick, Bearish),
-    MatHold                 => ("Mat Hold", Candlestick, Bullish),
-    BullishThreeLineStrike  => ("Bullish Three Line Strike", Candlestick, Bullish),
-    BearishThreeLineStrike  => ("Bearish Three Line Strike", Candlestick, Bearish),
-    ConcealingBabySwallow   => ("Concealing Baby Swallow", Candlestick, Bullish),
-    LadderBottom            => ("Ladder Bottom", Candlestick, Bullish),
-    BullishBreakaway        => ("Bullish Breakaway", Candlestick, Bullish),
-    BearishBreakaway        => ("Bearish Breakaway", Candlestick, Bearish),
-    BullishHikkake          => ("Bullish Hikkake", Candlestick, Bullish),
-    BearishHikkake          => ("Bearish Hikkake", Candlestick, Bearish),
-
-    // ---- screener scans ported from the user's Chartink setups -------------
-    //
-    // The only non-candlestick entry. The geometric chart-structure recognisers
-    // (cup shapes, double tops, head and shoulders, triangles, wedges, flags,
-    // Darvas boxes, VCP, rounding bottoms, base breakouts) were removed on
-    // request — they are the family where "did it really form?" is a matter of
-    // opinion, and this scan answers the same question with rules that are not.
-    ChartinkCupBreakout     => ("Cup & Handle Breakout (Chartink)", Chart, Bullish),
+    // The whole catalogue. Candlestick recognisers (75 of them) and geometric
+    // chart structures (24) were both built, tested, and then removed on
+    // request — the app now reports exactly one thing, and it is the one whose
+    // rules are not a matter of opinion. Both sets live in git history.
+    ChartinkCupBreakout => ("Cup & Handle Breakout (Chartink)", Chart, Bullish),
 }
 
 /// One recognised pattern occurrence.
@@ -246,16 +162,10 @@ mod tests {
     }
 
     #[test]
-    fn catalogue_is_candlesticks_plus_the_chartink_scan() {
-        let candles = PatternKind::ALL.iter().filter(|k| k.family() == Candlestick).count();
-        let chart = PatternKind::ALL.iter().filter(|k| k.family() == Chart).count();
-        assert!(candles > 50, "the full classical candlestick set should still be here");
-        // Geometric structures were removed on request; only the Chartink scan
-        // remains outside the candlestick family.
-        assert_eq!(chart, 1);
-        assert_eq!(
-            PatternKind::ALL.iter().find(|k| k.family() == Chart),
-            Some(&PatternKind::ChartinkCupBreakout)
-        );
+    fn the_catalogue_is_exactly_the_chartink_scan() {
+        // Candlesticks and geometric structures were both removed on request.
+        // If either ever comes back, this is the line that will say so.
+        assert_eq!(PatternKind::ALL, &[PatternKind::ChartinkCupBreakout]);
+        assert!(PatternKind::ALL.iter().all(|k| k.family() == Chart));
     }
 }

@@ -1,6 +1,5 @@
 //! Pattern recognition: Japanese candlesticks and multi-week chart structures.
 
-pub mod candlesticks;
 pub mod scans;
 pub mod types;
 
@@ -25,8 +24,7 @@ pub struct PatternParams {
 /// score — several windows can legitimately match the same structure, and the
 /// user wants one row per pattern occurrence, not one per window that saw it.
 pub fn detect_all(candles: &[Candle], params: &PatternParams) -> Vec<Detection> {
-    let mut all = candlesticks::detect(candles);
-    all.extend(scans::cup_breakout(candles, &params.chartink));
+    let mut all = scans::cup_breakout(candles, &params.chartink);
 
     all.sort_by(|a, b| {
         (a.kind.key(), a.end)
@@ -89,13 +87,13 @@ mod tests {
     }
 
     #[test]
-    fn only_candlesticks_and_the_chartink_scan_are_produced() {
-        use types::{Family, PatternKind};
-        let dets = detect_all(&candles(220), &PatternParams::default());
-        for d in &dets {
-            assert!(
-                d.kind.family() == Family::Candlestick || d.kind == PatternKind::ChartinkCupBreakout,
-                "geometric chart structures were removed, but {:?} appeared",
+    fn only_the_chartink_scan_is_produced() {
+        use types::PatternKind;
+        for d in detect_all(&candles(220), &PatternParams::default()) {
+            assert_eq!(
+                d.kind,
+                PatternKind::ChartinkCupBreakout,
+                "the catalogue is one scan; {:?} should not exist",
                 d.kind
             );
         }

@@ -1039,45 +1039,11 @@ impl SpiderApp {
     // -----------------------------------------------------------------------
 
     fn scanner_tab(&mut self, ui: &mut egui::Ui) {
+        // The family, direction and pattern-kind pickers are gone: with a single
+        // pattern in the catalogue every one of them had exactly one useful
+        // setting, and a control that cannot change anything is worse than no
+        // control. They come back with the catalogue if it ever grows again.
         ui.horizontal_wrapped(|ui| {
-            egui::ComboBox::from_id_salt("family")
-                .selected_text(match self.filter.family {
-                    None => "All families",
-                    Some(Family::Candlestick) => "Candlestick",
-                    Some(Family::Chart) => "Chart",
-                })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.filter.family, None, "All families");
-                    ui.selectable_value(&mut self.filter.family, Some(Family::Candlestick), "Candlestick");
-                    ui.selectable_value(&mut self.filter.family, Some(Family::Chart), "Chart");
-                });
-
-            egui::ComboBox::from_id_salt("direction")
-                .selected_text(match self.filter.direction {
-                    None => "Any direction",
-                    Some(d) => d.as_str(),
-                })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.filter.direction, None, "Any direction");
-                    ui.selectable_value(&mut self.filter.direction, Some(Direction::Bullish), "Bullish");
-                    ui.selectable_value(&mut self.filter.direction, Some(Direction::Bearish), "Bearish");
-                    ui.selectable_value(&mut self.filter.direction, Some(Direction::Neutral), "Neutral");
-                });
-
-            egui::ComboBox::from_id_salt("kind")
-                .width(230.0)
-                .selected_text(self.filter.kind.map(|k| k.label()).unwrap_or("All patterns"))
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.filter.kind, None, "All patterns");
-                    ui.separator();
-                    for &kind in PatternKind::ALL {
-                        if self.filter.family.map(|f| f != kind.family()).unwrap_or(false) {
-                            continue;
-                        }
-                        ui.selectable_value(&mut self.filter.kind, Some(kind), kind.label());
-                    }
-                });
-
             ui.add(egui::Slider::new(&mut self.filter.min_score, 0.0..=1.0).text("min score"));
             ui.add(
                 egui::TextEdit::singleline(&mut self.filter.symbol_search)
