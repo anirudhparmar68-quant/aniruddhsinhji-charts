@@ -303,10 +303,16 @@ impl SpiderApp {
         sync::snapshot(&self.worker.state)
     }
 
-    fn select(&mut self, key: String) {
+    /// Pick a stock without changing which tab is showing.
+    fn preselect(&mut self, key: String) {
         let bars = self.snapshot().candles.get(&key).map(|c| c.len()).unwrap_or(0);
         self.selected = Some(key);
         self.chart.reset_to_latest(bars);
+    }
+
+    /// Pick a stock and show its chart — what a click on a symbol means.
+    fn select(&mut self, key: String) {
+        self.preselect(key);
         self.tab = Tab::Chart;
     }
 }
@@ -334,7 +340,10 @@ impl eframe::App for SpiderApp {
                 })
                 .map(|(key, _)| key.clone());
             if let Some(key) = pick {
-                self.select(key);
+                // Arm the chart, but leave the user on Today — otherwise the
+                // startup pick would immediately navigate away from the tab the
+                // app is supposed to open on.
+                self.preselect(key);
             }
         }
 
