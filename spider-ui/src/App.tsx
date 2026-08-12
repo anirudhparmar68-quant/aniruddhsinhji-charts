@@ -503,11 +503,23 @@ export default function App() {
   const last = Math.min(rows.length, Math.ceil((top + viewportH) / ROW_H) + OVERSCAN);
   const slice = rows.slice(first, last);
 
-  // A list that changes identity starts at the top. Carrying the old offset
-  // over leaves the auto-selected first row scrolled out of sight.
+  // When the list changes identity, land on the selected row rather than
+  // carrying the old scroll offset over. Switching tabs used to leave the
+  // stock still selected but hundreds of rows above the viewport, which reads
+  // as having lost it. Falls back to the top when the selection is not in the
+  // new list.
+  //
+  // Deliberately keyed on the tab, window and search only: re-running it on
+  // every data refresh would drag the list back while it was being read.
   useEffect(() => {
-    if (rowsRef.current) rowsRef.current.scrollTop = 0;
-    setScrollTop(0);
+    const el = rowsRef.current;
+    if (!el) return;
+    const i = selected ? rows.findIndex((r) => r.key === selected) : -1;
+    // A third of the way down, so there is context above as well as below.
+    const top = i >= 0 ? Math.max(0, i * ROW_H - Math.floor(viewportH / 3)) : 0;
+    el.scrollTop = top;
+    setScrollTop(top);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, windowIdx, query]);
 
   const busy = status?.busy ?? false;
