@@ -414,19 +414,19 @@ impl SpiderApp {
                     ))
                     .small(),
                 );
-                // Stale data is worse than missing data: it looks fine and
-                // quietly shrinks every "latest candle" view.
+                // Shown so the Today counts add up, not as a warning: a
+                // bhavcopy lists only what traded, so a missing bar means the
+                // stock was untraded that session. Nothing failed.
                 if snap.stale_count > 0 {
                     ui.label(
-                        RichText::new(format!("⚠ {} stocks a session behind", snap.stale_count))
+                        RichText::new(format!("{} did not trade", snap.stale_count))
                             .small()
-                            .strong()
-                            .color(Color32::from_rgb(235, 170, 60)),
+                            .weak(),
                     )
                     .on_hover_text(
-                        "Upstox publishes daily candles a few hours after the close, and not for \
-                         every scrip at once. These stocks are missing the newest session, so they \
-                         are absent from Today and the Scanner. Press History to top them up.",
+                        "These stocks printed no bar on the newest session, so they cannot appear \
+                         in Today or the Scanner. Illiquid names skip days routinely — this is not \
+                         a data problem and re-syncing will not change it.",
                     );
                 }
 
@@ -715,11 +715,9 @@ impl SpiderApp {
             );
             if stale > 0 {
                 ui.label(
-                    RichText::new(format!("· {stale} stocks not counted — data a session behind"))
-                        .small()
-                        .color(Color32::from_rgb(235, 170, 60)),
+                    RichText::new(format!("· {stale} did not trade this session")).small().weak(),
                 )
-                .on_hover_text("Press History on the toolbar to fetch their missing session");
+                .on_hover_text("No bar means no trade — illiquid names skip days routinely");
             }
             if ui
                 .small_button("Export CSV")

@@ -126,13 +126,13 @@ pub struct Shared {
     pub latest_session: Option<NaiveDate>,
     /// instrument_key → what happened on `latest_session`.
     pub latest_hits: Arc<HashMap<String, LatestSummary>>,
-    /// Included stocks whose newest bar is older than `latest_session`.
+    /// Included stocks with no bar on `latest_session`.
     ///
-    /// Upstox publishes each day's daily candle some hours after the close, and
-    /// not for every scrip at once. A sync run too early therefore leaves part
-    /// of the universe a session behind — and those stocks then vanish from the
-    /// "latest candle" views without explanation. This count is what makes that
-    /// visible instead of silent.
+    /// Since the tail comes from bhavcopy, and a bhavcopy lists only the scrips
+    /// that actually traded, a missing bar means the stock **did not trade** —
+    /// normal for illiquid names, several of which skip days routinely. It is
+    /// worth showing so the Today counts add up, but it is not a fault and the
+    /// user cannot fix it by re-syncing.
     pub stale_count: usize,
 }
 
@@ -686,12 +686,11 @@ impl WorkerCtx {
         let _ = self.events.send(Event::DataChanged);
 
         if stale_count > 0 {
-            let _ = self.events.send(Event::Error(format!(
-                "{stale_count} of {included} stocks are a session behind {}. Upstox publishes \
-                 daily candles a few hours after the close and not for every scrip at once, so a \
-                 sync run too early catches only part of the market. Press History to top them up.",
+            // Status, not an error: nothing failed and there is nothing to fix.
+            self.status(format!(
+                "{stale_count} of {included} stocks did not trade on {}",
                 latest_session.map(|d| d.to_string()).unwrap_or_default()
-            )));
+            ));
         }
         self.status(format!("{included} stocks in the universe"));
         Ok(())
