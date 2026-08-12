@@ -14,14 +14,33 @@ use std::io::Read;
 const NSE_URL: &str = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz";
 const BSE_URL: &str = "https://assets.upstox.com/market-quote/instruments/exchange/BSE.json.gz";
 
-/// Substrings that mark an instrument as "not an operating company".
-/// Matched against trading symbol and name, upper-cased.
-const NON_EQUITY_MARKERS: &[&str] = &[
-    "ETF", "BEES", "IETF", "GOLDCASE", "SILVERCASE", "MUTUAL FUND", "MUTUALFUND",
-    "INDEX FUND", "LIQUIDCASE", "GILT", "SGB", "SOV GOLD", "SOVEREIGN GOLD",
-    "TBILL", "T-BILL", "GOI LOAN", "STATE DEV", " SDL ", "NCD", "BOND",
-    "DEBENTURE", "INVIT", "REIT", "PARTLY PAID", "RIGHTS ENT",
+/// NSE cash-segment series that are ordinary equity.
+///
+/// `EQ` is rolling settlement; `BE` and `BZ` are the trade-to-trade and
+/// surveillance tiers. Those are still real companies that can be held
+/// overnight, and accepting only `EQ` silently deleted Valor Estate, HMT,
+/// Bliss GVS Pharma, BGR Energy, Hi-Tech Gears and Diamond Power Infra.
+const NSE_EQUITY_SERIES: &[&str] = &["EQ", "BE", "BZ"];
+
+/// Words that mark an instrument as "not an operating company", matched as
+/// **whole words**.
+///
+/// Substring matching is wrong here and quietly costs you real companies:
+/// "BEES" sits inside BRAINBEES SOLUTIONS, which is FirstCry, not a Nippon ETF.
+const NON_EQUITY_WORDS: &[&str] = &[
+    "ETF", "IETF", "GILT", "SGB", "TBILL", "NCD", "BOND", "DEBENTURE", "INVIT",
+    "REIT", "SDL",
 ];
+
+/// Phrases distinctive enough that they can be matched anywhere in the text.
+const NON_EQUITY_PHRASES: &[&str] = &[
+    "MUTUAL FUND", "MUTUALFUND", "INDEX FUND", "SOVEREIGN GOLD", "SOV GOLD",
+    "GOI LOAN", "STATE DEV", "T-BILL", "PARTLY PAID", "RIGHTS ENT",
+];
+
+/// Endings used by ETF *tickers* — NIFTYBEES, GOLDBEES, LIQUIDCASE. Checked on
+/// the symbol only, so a company whose name merely contains one is safe.
+const ETF_SYMBOL_SUFFIXES: &[&str] = &["BEES", "IETF", "ETF", "CASE"];
 
 /// Trading-symbol suffixes for rights entitlements / partly paid / when-issued
 /// scrips. These are separate lines of the same company, not the company itself.
@@ -109,7 +128,7 @@ fn is_equity_series_isin(isin: &str) -> bool {
 fn looks_like_company_share(raw: &RawInstrument, exchange: Exchange, bse_groups: &[String]) -> bool {
     let kind = raw.instrument_type.trim().to_ascii_uppercase();
     let accepted = match exchange {
-        Exchange::Nse => kind == "EQ",
+        Exchange::Nse => NSE_EQUITY_SERIES.contains(&kind.as_str()),
         Exchange::Bse => bse_groups.iter().any(|g| g.eq_ignore_ascii_case(&kind)),
     };
     if !accepted {
@@ -118,18 +137,29 @@ fn looks_like_company_share(raw: &RawInstrument, exchange: Exchange, bse_groups:
     if !is_equity_series_isin(&isin_of(raw)) {
         return false;
     }
+
     let symbol = raw.trading_symbol.to_ascii_uppercase();
+    if ETF_SYMBOL_SUFFIXES.iter().any(|s| symbol.ends_with(s)) {
+        return false;
+    }
+    if NON_EQUITY_SUFFIXES.iter().any(|s| symbol.ends_with(s)) {
+        return false;
+    }
+
     let haystack = format!(
-        "{} {} {} {}",
-        symbol,
+        "{} {} {}",
         raw.name.to_ascii_uppercase(),
         raw.short_name.to_ascii_uppercase(),
         raw.security_type.to_ascii_uppercase()
     );
-    if NON_EQUITY_MARKERS.iter().any(|m| haystack.contains(m)) {
+    if NON_EQUITY_PHRASES.iter().any(|p| haystack.contains(p)) {
         return false;
     }
-    if NON_EQUITY_SUFFIXES.iter().any(|s| symbol.ends_with(s)) {
+    // Whole-word only: see the note on NON_EQUITY_WORDS.
+    if haystack
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|word| NON_EQUITY_WORDS.contains(&word))
+    {
         return false;
     }
     true
@@ -270,8 +300,34 @@ mod tests {
     #[test]
     fn drops_etfs_and_rights_entitlements() {
         assert!(!nse_ok(&raw("NIFTYBEES", "NIPPON INDIA ETF NIFTY 50", "EQ", "INF204KB14I2")));
+        assert!(!nse_ok(&raw("GOLDBEES", "NIPPON INDIA GOLD FUND", "EQ", "INE123A01011")));
         assert!(!nse_ok(&raw("SOMECO-RE", "SOME COMPANY RIGHTS", "EQ", "INE123A01011")));
         assert!(!nse_ok(&raw("SOMEFUT", "SOME COMPANY", "FUT", "INE123A01011")));
+    }
+
+    #[test]
+    fn a_company_whose_name_merely_contains_bees_is_kept() {
+        // FirstCry's legal name is BRAINBEES SOLUTIONS. Substring-matching
+        // "BEES" deleted it outright; the ticker is what identifies an ETF.
+        assert!(nse_ok(&raw("FIRSTCRY", "BRAINBEES SOLUTIONS LTD", "EQ", "INE02RE01045")));
+    }
+
+    #[test]
+    fn nse_trade_to_trade_and_surveillance_series_are_equity() {
+        // BE and BZ are ordinary companies in a stricter settlement tier, not a
+        // different asset class. Accepting only EQ lost dozens of real stocks.
+        assert!(nse_ok(&raw("DBREALTY", "VALOR ESTATE LIMITED", "BE", "INE879I01012")));
+        assert!(nse_ok(&raw("HMT", "HMT LTD", "BZ", "INE262A01018")));
+        assert!(nse_ok(&raw("BLISSGVS", "BLISS GVS PHARMA LTD", "BE", "INE416D01022")));
+        // SME and derivative series still stay out.
+        assert!(!nse_ok(&raw("SOMESME", "SOME SME LTD", "SM", "INE123A01011")));
+    }
+
+    #[test]
+    fn word_markers_do_not_fire_inside_longer_words() {
+        // "BOND" as a word means a debt line; inside "BONDADA" it means nothing.
+        assert!(nse_ok(&raw("BONDADA", "BONDADA ENGINEERING LTD", "EQ", "INE123A01011")));
+        assert!(!nse_ok(&raw("SOMEBOND", "SOME 8% BOND 2030", "EQ", "INE123A01011")));
     }
 
     #[test]

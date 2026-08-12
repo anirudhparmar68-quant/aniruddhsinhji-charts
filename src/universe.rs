@@ -18,6 +18,89 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 
 const OVERRIDES_FILE: &str = "mcap_overrides.csv";
+const ALLOWLIST_FILE: &str = "universe_symbols.csv";
+
+/// Symbols the universe is restricted to, when the user supplies a list.
+///
+/// A screener export is the practical way to express "market cap above ₹100
+/// crore": the screener already applied the filter, so the *membership* is the
+/// answer and the rupee figures are not needed. This matters because no free
+/// bulk market-cap feed keyed by symbol exists — see [`MarketCaps`].
+#[derive(Debug, Default, Clone)]
+pub struct Allowlist {
+    symbols: std::collections::HashSet<String>,
+}
+
+impl Allowlist {
+    pub fn is_empty(&self) -> bool {
+        self.symbols.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.symbols.len()
+    }
+
+    pub fn contains(&self, symbol: &str) -> bool {
+        self.symbols.contains(&symbol.trim().to_uppercase())
+    }
+
+    /// Read `data/universe_symbols.csv` if present.
+    ///
+    /// Deliberately forgiving about shape: a screener export can have any
+    /// columns in any order, so any column named like a ticker is used, and a
+    /// single-column file is taken as bare symbols. `#` lines are comments.
+    pub fn load() -> Result<Self> {
+        let path = data_dir().join(ALLOWLIST_FILE);
+        if !path.is_file() {
+            return Ok(Self::default());
+        }
+        let raw = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        Self::parse(&raw).with_context(|| format!("parsing {}", path.display()))
+    }
+
+    pub fn parse(data: &str) -> Result<Self> {
+        let mut reader = csv::ReaderBuilder::new()
+            .flexible(true)
+            .comment(Some(b'#'))
+            .from_reader(data.as_bytes());
+
+        let headers = reader.headers()?.clone();
+        let column = headers
+            .iter()
+            .position(|h| {
+                let h = h.trim().to_ascii_lowercase();
+                matches!(h.as_str(), "symbol" | "nsecode" | "bsecode" | "ticker" | "sm" | "scrip")
+            })
+            // A one-column file is just a list of tickers.
+            .or(if headers.len() == 1 { Some(0) } else { None });
+
+        let Some(column) = column else {
+            anyhow::bail!("needs a `symbol` column (or a single column of tickers)");
+        };
+
+        let mut symbols = std::collections::HashSet::new();
+        // A headerless single-column file would otherwise lose its first line.
+        if headers.len() == 1 {
+            if let Some(first) = headers.get(0) {
+                let first = first.trim().to_uppercase();
+                if !first.is_empty() && first != "SYMBOL" {
+                    symbols.insert(first);
+                }
+            }
+        }
+        for record in reader.records() {
+            let record = record?;
+            if let Some(symbol) = record.get(column) {
+                let symbol = symbol.trim().to_uppercase();
+                if !symbol.is_empty() {
+                    symbols.insert(symbol);
+                }
+            }
+        }
+        Ok(Self { symbols })
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Name normalisation
@@ -303,13 +386,25 @@ pub fn median_turnover_cr(candles: &[Candle], window: usize) -> f64 {
 }
 
 /// Final inclusion decision once history is available.
-pub fn decide_inclusion(inst: &Instrument, candles: &[Candle], settings: &Settings) -> bool {
+///
+/// A supplied allowlist is authoritative on *membership* — it already encodes
+/// whatever screen produced it — but the price and history guards still apply,
+/// because a stock with nine bars cannot be charted whatever any list says.
+pub fn decide_inclusion(
+    inst: &Instrument,
+    candles: &[Candle],
+    settings: &Settings,
+    allowlist: &Allowlist,
+) -> bool {
     // No history means nothing to chart or scan, whatever the market cap.
     if candles.len() < 30 {
         return false;
     }
     if candles[candles.len() - 1].close < settings.min_price {
         return false;
+    }
+    if !allowlist.is_empty() {
+        return allowlist.contains(&inst.symbol);
     }
     match inst.mcap_cr {
         Some(mcap) => mcap >= settings.min_mcap_cr,
@@ -445,12 +540,16 @@ mod tests {
         assert!((median_turnover_cr(&c, 60) - 1.0).abs() < 1e-9);
     }
 
+    fn no_list() -> Allowlist {
+        Allowlist::default()
+    }
+
     #[test]
     fn inclusion_respects_mcap_floor() {
         let s = Settings::default(); // 100 cr floor
         let c = candles(60, 100.0, 100_000);
-        assert!(decide_inclusion(&inst("BIG", "I1", Some(500.0)), &c, &s));
-        assert!(!decide_inclusion(&inst("SMALL", "I2", Some(50.0)), &c, &s));
+        assert!(decide_inclusion(&inst("BIG", "I1", Some(500.0)), &c, &s, &no_list()));
+        assert!(!decide_inclusion(&inst("SMALL", "I2", Some(50.0)), &c, &s, &no_list()));
     }
 
     #[test]
@@ -458,22 +557,69 @@ mod tests {
         let s = Settings::default(); // needs 0.25 cr median turnover
         let liquid = candles(60, 100.0, 100_000); // 1.0 cr/day
         let illiquid = candles(60, 100.0, 1_000); // 0.01 cr/day
-        assert!(decide_inclusion(&inst("UNKNOWN", "I3", None), &liquid, &s));
-        assert!(!decide_inclusion(&inst("UNKNOWN", "I4", None), &illiquid, &s));
+        assert!(decide_inclusion(&inst("UNKNOWN", "I3", None), &liquid, &s, &no_list()));
+        assert!(!decide_inclusion(&inst("UNKNOWN", "I4", None), &illiquid, &s, &no_list()));
     }
 
     #[test]
     fn unknown_mcap_can_be_excluded_outright() {
         let s = Settings { include_unknown_mcap: false, ..Settings::default() };
         let liquid = candles(60, 100.0, 100_000);
-        assert!(!decide_inclusion(&inst("UNKNOWN", "I5", None), &liquid, &s));
+        assert!(!decide_inclusion(&inst("UNKNOWN", "I5", None), &liquid, &s, &no_list()));
         assert!(!worth_downloading(&inst("UNKNOWN", "I5", None), &s));
     }
 
     #[test]
     fn penny_stocks_and_stubs_are_excluded() {
         let s = Settings::default();
-        assert!(!decide_inclusion(&inst("PENNY", "I6", Some(500.0)), &candles(60, 2.0, 10_000_000), &s));
-        assert!(!decide_inclusion(&inst("NEW", "I7", Some(500.0)), &candles(10, 100.0, 100_000), &s));
+        assert!(!decide_inclusion(&inst("PENNY", "I6", Some(500.0)), &candles(60, 2.0, 10_000_000), &s, &no_list()));
+        assert!(!decide_inclusion(&inst("NEW", "I7", Some(500.0)), &candles(10, 100.0, 100_000), &s, &no_list()));
+    }
+
+    fn named(symbol: &str) -> Instrument {
+        let mut i = inst("SOME CO", "INE000A01011", None);
+        i.symbol = symbol.into();
+        i
+    }
+
+    #[test]
+    fn an_allowlist_decides_membership() {
+        let s = Settings::default();
+        // Illiquid and with no market cap: normally excluded, but the list wins.
+        let thin = candles(60, 100.0, 1_000);
+        let list = Allowlist::parse("symbol\nWANTED\n").unwrap();
+        assert!(decide_inclusion(&named("WANTED"), &thin, &s, &list));
+        assert!(!decide_inclusion(&named("NOTWANTED"), &thin, &s, &list));
+    }
+
+    #[test]
+    fn an_allowlist_does_not_override_the_price_and_history_guards() {
+        let s = Settings::default();
+        let list = Allowlist::parse("symbol\nWANTED\n").unwrap();
+        // A ₹2 stock and a nine-bar listing cannot be charted, listed or not.
+        assert!(!decide_inclusion(&named("WANTED"), &candles(60, 2.0, 100_000), &s, &list));
+        assert!(!decide_inclusion(&named("WANTED"), &candles(9, 100.0, 100_000), &s, &list));
+    }
+
+    #[test]
+    fn allowlist_reads_real_screener_shapes() {
+        // Extra columns, any order.
+        let wide = Allowlist::parse("Sr.,Stock Name,Symbol,close,volume\n1,Some Co Ltd,ABC,10,100\n").unwrap();
+        assert!(wide.contains("abc"));
+        assert_eq!(wide.len(), 1);
+
+        // A bare single column of tickers, header or not.
+        let bare = Allowlist::parse("RELIANCE\nINFY\nTCS\n").unwrap();
+        assert_eq!(bare.len(), 3);
+        assert!(bare.contains("INFY"));
+
+        let headed = Allowlist::parse("symbol\nRELIANCE\nINFY\n").unwrap();
+        assert_eq!(headed.len(), 2);
+    }
+
+    #[test]
+    fn allowlist_is_absent_rather_than_empty_when_unusable() {
+        assert!(Allowlist::default().is_empty());
+        assert!(Allowlist::parse("close,volume\n10,100\n").is_err());
     }
 }

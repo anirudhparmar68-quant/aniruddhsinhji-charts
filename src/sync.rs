@@ -629,13 +629,20 @@ impl WorkerCtx {
         let candles = store::load_all_candles(&conn)?;
 
         // Final inclusion now that we can see liquidity and price.
+        let allowlist = universe::Allowlist::load().unwrap_or_default();
+        if !allowlist.is_empty() {
+            self.status(format!(
+                "Universe restricted to your {} listed symbols",
+                allowlist.len()
+            ));
+        }
         let mut stats = UniverseStats { total: instruments.len(), ..Default::default() };
         for inst in instruments.iter_mut() {
             if inst.mcap_cr.is_some() {
                 stats.mcap_resolved += 1;
             }
             let series = candles.get(&inst.instrument_key).map(|v| v.as_slice()).unwrap_or(&[]);
-            inst.included = universe::decide_inclusion(inst, series, &self.settings);
+            inst.included = universe::decide_inclusion(inst, series, &self.settings, &allowlist);
             if inst.included {
                 if inst.mcap_cr.is_some() {
                     stats.passed_on_mcap += 1;
