@@ -126,8 +126,17 @@ function remembered<T>(key: string, fallback: T): T {
 }
 
 export default function App() {
-  const [view, setView] = useState<View>(() => remembered<View>("view", "scan"));
-  const [windowIdx, setWindowIdx] = useState(() => remembered("window", 0));
+  // Restored values are validated, never trusted: these lists have been tuned
+  // before, and a saved index or key that no longer exists would throw on the
+  // very first render with nothing on screen to explain it.
+  const [view, setView] = useState<View>(() => {
+    const v = remembered<View>("view", "scan");
+    return v === "scan" || v === "all" ? v : "scan";
+  });
+  const [windowIdx, setWindowIdx] = useState(() => {
+    const i = remembered("window", 0);
+    return Number.isInteger(i) && i >= 0 && i < WINDOWS.length ? i : 0;
+  });
   const [universe, setUniverse] = useState<Stock[]>([]);
   const [hits, setHits] = useState<ScanHit[]>([]);
   const [status, setStatus] = useState<Status | null>(null);
@@ -135,13 +144,32 @@ export default function App() {
   const [selected, setSelected] = useState<string | null>(null);
   const [chart, setChart] = useState<ChartData | null>(null);
   const [listW, setListW] = useState(() => remembered("listWidth", 330));
-  const [sortKey, setSortKey] = useState<SortKey>(() => remembered<SortKey>("sortKey", "symbol"));
-  const [sortDesc, setSortDesc] = useState(() => remembered("sortDesc", false));
+  const [sortKey, setSortKey] = useState<SortKey>(() => {
+    const k = remembered<SortKey>("sortKey", "symbol");
+    const known = new Set([...SORTS.scan, ...SORTS.all].map((s) => s.key));
+    return known.has(k) ? k : "symbol";
+  });
+  const [sortDesc, setSortDesc] = useState(() => remembered<boolean>("sortDesc", false) === true);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   /** Transient line in the status bar for things the engine never hears about,
-   *  like where an export was written. Cleared by the next engine message. */
+   *  like where an export was written. */
   const [flash, setFlash] = useState<string | null>(null);
+  const flashTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  /** Show a note for long enough to read a file path off it.
+   *
+   *  It used to be cleared by the next engine event, which meant exporting
+   *  during a sync wrote the file and then replaced the path with a progress
+   *  line before it could be read. Engine *errors* still take precedence in the
+   *  status bar; routine chatter no longer does. */
+  const note = useCallback((message: string | null) => {
+    clearTimeout(flashTimer.current);
+    setFlash(message);
+    if (message) flashTimer.current = setTimeout(() => setFlash(null), 12000);
+  }, []);
+
+  useEffect(() => () => clearTimeout(flashTimer.current), []);
 
   useEffect(() => {
     try {
@@ -161,17 +189,24 @@ export default function App() {
   const [viewportH, setViewportH] = useState(600);
 
   // -- data ----------------------------------------------------------------
-  const refreshStatus = useCallback(() => {
-    getStatus().then(setStatus).catch(() => {});
+  // A swallowed failure here is the worst outcome available: an empty list and
+  // an empty chart look exactly like an engine that has no data yet, so the one
+  // thing that would explain it never reaches the screen. Every call says so.
+  const failed = useCallback((what: string) => (e: unknown) => {
+    note(`Could not load ${what}: ${e}`);
   }, []);
+
+  const refreshStatus = useCallback(() => {
+    getStatus().then(setStatus).catch(failed("the status"));
+  }, [failed]);
 
   const refreshData = useCallback(() => {
-    getUniverse().then(setUniverse).catch(() => {});
-  }, []);
+    getUniverse().then(setUniverse).catch(failed("the stock list"));
+  }, [failed]);
 
   const refreshHits = useCallback(() => {
-    getScanner(WINDOWS[windowIdx].days).then(setHits).catch(() => {});
-  }, [windowIdx]);
+    getScanner(WINDOWS[windowIdx].days).then(setHits).catch(failed("the scan results"));
+  }, [windowIdx, failed]);
 
   useEffect(() => {
     refreshStatus();
@@ -184,7 +219,6 @@ export default function App() {
     let pending: ReturnType<typeof setTimeout> | undefined;
     const off = onEngine((topic) => {
       // A real engine message supersedes whatever local note was showing.
-      setFlash(null);
       refreshStatus();
       if (topic === "engine:status") return;
       clearTimeout(pending);
@@ -211,8 +245,12 @@ export default function App() {
 
   // -- rows ----------------------------------------------------------------
   /** Score and RSI mean nothing on the All stocks tab, so a sort carried over
-   *  from the scanner falls back to the alphabet rather than sorting by zero. */
-  const effSort: SortKey = SORTS[view].some((s) => s.key === sortKey) ? sortKey : "symbol";
+   *  from the scanner falls back to the alphabet rather than sorting by zero.
+   *  The direction has to fall back with it: descending is right for a score
+   *  and wrong for the alphabet, and All stocks opening at Z–A is disorienting. */
+  const sortOffered = SORTS[view].some((s) => s.key === sortKey);
+  const effSort: SortKey = sortOffered ? sortKey : "symbol";
+  const effDesc = sortOffered ? sortDesc : defaultDesc("symbol");
 
   const rows: Row[] = useMemo(() => {
     let base: Row[];
@@ -272,10 +310,10 @@ export default function App() {
       const c = typeof x === "string" ? x.localeCompare(y as string) : x - (y as number);
       // Ties fall back to the alphabet so the order never shuffles between
       // refreshes — a list that reorders under you loses your place.
-      return (sortDesc ? -c : c) || a.symbol.localeCompare(b.symbol);
+      return (effDesc ? -c : c) || a.symbol.localeCompare(b.symbol);
     });
     return base;
-  }, [view, universe, hits, query, effSort, sortDesc]);
+  }, [view, universe, hits, query, effSort, effDesc]);
 
   /** Distinct stocks in the current scanner window, before any search. */
   const scanCount = useMemo(() => new Set(hits.map((h) => h.key)).size, [hits]);
@@ -302,7 +340,9 @@ export default function App() {
       .then((c) => {
         if (live) setChart(c);
       })
-      .catch(() => {});
+      .catch((e) => {
+        if (live) note(`Could not load that chart: ${e}`);
+      });
     return () => {
       live = false;
     };
@@ -328,8 +368,13 @@ export default function App() {
       if (!list.length) return prev;
       const from = Math.max(0, list.findIndex((r) => r.key === prev));
       const next = Math.min(Math.max(from + delta, 0), list.length - 1);
-      pendingScroll.current = next;
-      return list[next].key;
+      const key = list[next].key;
+      // Only arm the scroll when the selection actually moves. Pressing Down on
+      // the last row changes nothing, so React skips the render and the effect
+      // never runs — leaving a stale index armed that would then yank the list
+      // away from the next row the user clicked.
+      if (key !== prev) pendingScroll.current = next;
+      return key;
     });
   }, []);
 
@@ -361,7 +406,14 @@ export default function App() {
           (el as HTMLInputElement).blur();
           e.preventDefault();
         }
-        if (e.key !== "ArrowUp" && e.key !== "ArrowDown" && e.key !== "Enter") return;
+        if (e.key === "Enter") {
+          // Leave the search box, keep the filter. Handled here rather than in
+          // the switch below so a focused toolbar button keeps its own Enter.
+          (el as HTMLInputElement).blur();
+          e.preventDefault();
+          return;
+        }
+        if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
       }
 
       switch (e.key) {
@@ -384,9 +436,6 @@ export default function App() {
           break;
         case "End":
           move(rows.length);
-          break;
-        case "Enter":
-          (el as HTMLElement)?.blur?.();
           break;
         case "/":
           searchRef.current?.focus();
@@ -445,28 +494,40 @@ export default function App() {
     return () => ro.disconnect();
   }, []);
 
-  const first = Math.max(0, Math.floor(scrollTop / ROW_H) - OVERSCAN);
-  const last = Math.min(rows.length, Math.ceil((scrollTop + viewportH) / ROW_H) + OVERSCAN);
+  // Switching to a shorter list leaves the scroller at an offset the new list
+  // cannot reach; the browser corrects it, but only on the next scroll event.
+  // Clamping here means the frame in between is not a blank band.
+  const maxTop = Math.max(0, rows.length * ROW_H - viewportH);
+  const top = Math.min(scrollTop, maxTop);
+  const first = Math.min(Math.max(0, Math.floor(top / ROW_H) - OVERSCAN), Math.max(0, rows.length - 1));
+  const last = Math.min(rows.length, Math.ceil((top + viewportH) / ROW_H) + OVERSCAN);
   const slice = rows.slice(first, last);
+
+  // A list that changes identity starts at the top. Carrying the old offset
+  // over leaves the auto-selected first row scrolled out of sight.
+  useEffect(() => {
+    if (rowsRef.current) rowsRef.current.scrollTop = 0;
+    setScrollTop(0);
+  }, [view, windowIdx, query]);
 
   const busy = status?.busy ?? false;
   const job = (name: Job) => () => {
     setMenuOpen(false);
-    setFlash(null);
-    runJob(name).catch((e) => setFlash(String(e)));
+    note(null);
+    runJob(name).catch((e) => note(String(e)));
     refreshStatus();
   };
 
   const exportRows = async () => {
     if (!rows.length) {
-      setFlash("Nothing to export — the list is empty.");
+      note("Nothing to export — the list is empty.");
       return;
     }
     const name = view === "scan" ? "scanner_export" : "universe_export";
     try {
-      setFlash(`Wrote ${rows.length} rows to ${await exportCsv(name, toCsv(rows, view))}`);
+      note(`Wrote ${rows.length} rows to ${await exportCsv(name, toCsv(rows, view))}`);
     } catch (e) {
-      setFlash(`Export failed: ${e}`);
+      note(`Export failed: ${e}`);
     }
   };
 
@@ -584,7 +645,11 @@ export default function App() {
                 key={s.key}
                 className={`sort ${effSort === s.key ? "on" : ""}`}
                 onClick={() => {
-                  if (effSort === s.key) setSortDesc((d) => !d);
+                  // Compared against the *stored* key, not the displayed one.
+                  // On All stocks with "Score" still stored, A–Z is highlighted
+                  // by the fallback; treating a click on it as "toggle" would
+                  // silently flip the scanner's direction on the other tab.
+                  if (sortKey === s.key) setSortDesc((d) => !d);
                   else {
                     setSortKey(s.key);
                     setSortDesc(defaultDesc(s.key));
@@ -593,7 +658,7 @@ export default function App() {
                 title={`Sort by ${s.label}`}
               >
                 {s.label}
-                {effSort === s.key && <i>{sortDesc ? "▾" : "▴"}</i>}
+                {effSort === s.key && <i>{effDesc ? "▾" : "▴"}</i>}
               </button>
             ))}
           </div>
@@ -666,13 +731,15 @@ export default function App() {
       </div>
 
       {settingsOpen && (
-        <SettingsSheet onClose={() => setSettingsOpen(false)} onSaved={setFlash} />
+        <SettingsSheet onClose={() => setSettingsOpen(false)} onSaved={note} />
       )}
 
       <footer className="statusbar">
         <span className={`dot ${busy ? "busy" : ""}`} />
-        <span className={`msg ${status?.error && !flash ? "err" : ""}`}>
-          {flash ?? status?.error ?? status?.message ?? "Ready"}
+        {/* An engine error always wins: it is the one message that means
+            something is wrong. A local note beats routine chatter. */}
+        <span className={`msg ${status?.error ? "err" : ""}`}>
+          {status?.error ?? flash ?? status?.message ?? "Ready"}
         </span>
         {busy && status && status.progressTotal > 0 && (
           <>

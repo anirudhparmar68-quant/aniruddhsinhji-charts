@@ -56,8 +56,16 @@ function Num({
       onBlur={() => {
         focused.current = false;
         const n = Number(raw);
-        if (raw.trim() === "" || Number.isNaN(n)) setRaw(String(value));
-        else onChange(clamp(n, min, max));
+        if (raw.trim() === "" || Number.isNaN(n)) {
+          setRaw(String(value));
+          return;
+        }
+        // Show what was actually committed. Clamping quietly while leaving the
+        // typed text in place meant a field could read 999 in a 0–1 setting and
+        // have saved 1 — the form disagreeing with the file it just wrote.
+        const committed = clamp(n, min, max);
+        setRaw(String(committed));
+        onChange(committed);
       }}
       onChange={(e) => {
         setRaw(e.target.value);
@@ -143,8 +151,7 @@ export default function SettingsSheet({
   const scanChanged =
     !!saved &&
     (JSON.stringify(draft.patterns) !== JSON.stringify(saved.patterns) ||
-      draft.min_pattern_score !== saved.min_pattern_score ||
-      draft.scan_lookback !== saved.scan_lookback);
+      draft.min_pattern_score !== saved.min_pattern_score);
 
   const save = async (rescan: boolean) => {
     setBusy(true);
@@ -228,16 +235,15 @@ export default function SettingsSheet({
               </div>
             </div>
 
+            {/* `scan_lookback` is deliberately not offered. It is still in
+                settings.json, but nothing in the engine reads it — the scan
+                covers every stored bar — so a control for it would look like a
+                knob and turn nothing. */}
             <div className="grid">
               <label>
                 <span>Minimum score to list</span>
                 <Num value={draft.min_pattern_score} step={0.05} min={0} max={1} onChange={(n) => set({ min_pattern_score: n })} />
                 <i>0–1. Raise to cut weaker hits out of the scanner.</i>
-              </label>
-              <label>
-                <span>Candles the scan looks back over</span>
-                <Num value={draft.scan_lookback} min={60} max={2000} width={74} onChange={(n) => set({ scan_lookback: n })} />
-                <i>Older bars are still charted, just not scanned.</i>
               </label>
             </div>
           </section>

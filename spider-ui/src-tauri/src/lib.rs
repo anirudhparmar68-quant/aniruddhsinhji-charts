@@ -15,6 +15,7 @@ use tauri::Emitter;
 
 use spider_charts::config::Settings;
 use spider_charts::model::Candle;
+use spider_charts::patterns::types::Detection;
 use spider_charts::sync::{self, Command, Event, LatestSummary, SharedState};
 
 // ---------------------------------------------------------------------------
@@ -140,6 +141,18 @@ fn ymd(d: NaiveDate) -> String {
     d.format("%Y-%m-%d").to_string()
 }
 
+/// Guard every float that crosses into JSON.
+///
+/// `serde_json` writes NaN and infinity as `null`, not as an error. The front
+/// end types these fields as numbers, so one bad value would reach
+/// `(null).toFixed(2)`, take the render down, and leave a blank window with
+/// nothing in the status bar to explain it. Zero is wrong too, but it is
+/// visibly wrong in one cell instead of invisibly fatal for the whole list.
+#[inline]
+fn finite(x: f64) -> f64 {
+    if x.is_finite() { x } else { 0.0 }
+}
+
 /// Percentage move of bar `i` against the one before it.
 fn change_pct_at(candles: &[Candle], i: usize) -> f64 {
     if i == 0 || i >= candles.len() {
@@ -155,6 +168,21 @@ fn change_pct_at(candles: &[Candle], i: usize) -> f64 {
 
 fn change_pct(candles: &[Candle]) -> f64 {
     change_pct_at(candles, candles.len().saturating_sub(1))
+}
+
+/// Which bar a scan row is talking about.
+///
+/// A detection carries a bar *index*, and an index is only meaningful against
+/// the exact series it was computed over. Pruning old sessions shifts every
+/// index by the number of bars dropped, so a stored index can quietly address a
+/// different day. The row also carries the session *date*, which cannot drift,
+/// so that is what is trusted; the index is only the fallback for a date that
+/// is genuinely absent from the series.
+fn bar_for(candles: &[Candle], date: NaiveDate, index_hint: usize) -> usize {
+    match candles.binary_search_by(|c| c.date.cmp(&date)) {
+        Ok(i) => i,
+        Err(_) => index_hint.min(candles.len().saturating_sub(1)),
+    }
 }
 
 /// Volume ratio and RSI **as they stood on bar `i`**.
@@ -191,9 +219,23 @@ fn get_status(state: tauri::State<'_, AppState>) -> Status {
     status.total_instruments = snap.instruments.len();
     status.hit_count = snap.latest_hits.len();
     status.stale_count = snap.stale_count;
-    status.last_sync = snap.last_sync.clone();
+    status.last_sync = snap.last_sync.as_deref().map(friendly_time);
     status.latest_session = snap.latest_session.map(ymd);
     status
+}
+
+/// The store keeps `last_sync` as a UTC RFC 3339 stamp, which is the right
+/// thing on disk and unreadable in a status bar. Shown in IST, since that is
+/// the only market this app covers.
+fn friendly_time(raw: &str) -> String {
+    match chrono::DateTime::parse_from_rfc3339(raw) {
+        Ok(t) => {
+            let ist = chrono::FixedOffset::east_opt(5 * 3600 + 30 * 60).expect("IST offset is valid");
+            t.with_timezone(&ist).format("%d %b, %H:%M").to_string()
+        }
+        // Never invent a time: an unparseable stamp is shown as it was stored.
+        Err(_) => raw.to_string(),
+    }
 }
 
 /// The full universe, alphabetically — the list the app navigates with arrows.
@@ -221,16 +263,22 @@ fn universe_rows(snap: &sync::Shared) -> Vec<StockDto> {
                 symbol: inst.symbol.clone(),
                 name: inst.name.clone(),
                 exchange: inst.exchange.as_str().to_string(),
-                mcap_cr: inst.mcap_cr,
-                close: last.map(|c| c.close).unwrap_or(0.0),
-                change_pct: change_pct(candles),
-                volume_ratio: summary.map(|s| s.volume_ratio).unwrap_or(0.0),
-                rsi: summary.map(|s: &LatestSummary| s.rsi).unwrap_or(0.0),
+                mcap_cr: inst.mcap_cr.map(finite),
+                close: finite(last.map(|c| c.close).unwrap_or(0.0)),
+                change_pct: finite(change_pct(candles)),
+                volume_ratio: finite(summary.map(|s| s.volume_ratio).unwrap_or(0.0)),
+                rsi: finite(summary.map(|s: &LatestSummary| s.rsi).unwrap_or(0.0)),
                 hit: summary.is_some(),
-                score: summary.map(|s| s.best_score).unwrap_or(0.0),
+                score: finite(summary.map(|s| s.best_score).unwrap_or(0.0)),
                 bars: candles.len(),
+                // No bar on the newest session — including no bars at all,
+                // which is what a newly listed scrip looks like before its
+                // first backfill. Both mean "there is nothing to read here
+                // today", and calling the second one current would put a ₹0.00
+                // close in the list with nothing to explain it.
                 stale: match (latest, last) {
                     (Some(session), Some(c)) => c.date < session,
+                    (Some(_), None) => true,
                     _ => false,
                 },
             }
@@ -257,7 +305,14 @@ fn chart_for(snap: &sync::Shared, key: &str) -> Option<ChartDto> {
         .detections
         .get(key)
         .map(|dets| {
-            dets.iter()
+            // The engine hands detections back newest-first. Two things need
+            // them the other way round: lightweight-charts requires markers in
+            // ascending time order, and the chart's signal card reads the last
+            // one as "the most recent" — which, unsorted, showed a setup from
+            // six months ago beside a stock that fired today.
+            let mut dets: Vec<&Detection> = dets.iter().collect();
+            dets.sort_by_key(|d| d.end);
+            dets.into_iter()
                 .filter_map(|d| {
                     // A detection indexes bars, so a stale index would silently
                     // draw a marker on the wrong candle; drop it instead.
@@ -268,7 +323,7 @@ fn chart_for(snap: &sync::Shared, key: &str) -> Option<ChartDto> {
                         start_time: ymd(start.date),
                         pattern: d.kind.label().to_string(),
                         direction: d.direction.as_str().to_string(),
-                        score: d.score,
+                        score: finite(d.score),
                         detail: d.detail.clone(),
                     })
                 })
@@ -285,11 +340,11 @@ fn chart_for(snap: &sync::Shared, key: &str) -> Option<ChartDto> {
             .iter()
             .map(|c| CandleDto {
                 time: ymd(c.date),
-                open: c.open,
-                high: c.high,
-                low: c.low,
-                close: c.close,
-                volume: c.volume as f64,
+                open: finite(c.open),
+                high: finite(c.high),
+                low: finite(c.low),
+                close: finite(c.close),
+                volume: finite(c.volume as f64),
             })
             .collect(),
         markers,
@@ -322,7 +377,7 @@ fn scan_rows(snap: &sync::Shared, days: Option<i64>) -> Vec<ScanDto> {
         .filter(|r| cutoff.map(|c| r.date >= c).unwrap_or(true))
         .map(|r| {
             let candles = snap.candles.get(&r.instrument_key).unwrap_or(&empty);
-            let bar = r.detection.end.min(candles.len().saturating_sub(1));
+            let bar = bar_for(candles, r.date, r.detection.end);
             let (volume_ratio, rsi) = context_at(candles, bar);
             ScanDto {
                 key: r.instrument_key.clone(),
@@ -335,14 +390,14 @@ fn scan_rows(snap: &sync::Shared, days: Option<i64>) -> Vec<ScanDto> {
                 date: ymd(r.date),
                 pattern: r.detection.kind.label().to_string(),
                 direction: r.detection.direction.as_str().to_string(),
-                score: r.detection.score,
+                score: finite(r.detection.score),
                 detail: r.detection.detail.clone(),
                 // Everything below describes the bar the scan fired on, not the
                 // newest one, so a row from an older window stays self-consistent.
-                close: candles.get(bar).map(|c| c.close).unwrap_or(0.0),
-                change_pct: change_pct_at(candles, bar),
-                volume_ratio,
-                rsi,
+                close: finite(candles.get(bar).map(|c| c.close).unwrap_or(0.0)),
+                change_pct: finite(change_pct_at(candles, bar)),
+                volume_ratio: finite(volume_ratio),
+                rsi: finite(rsi),
             }
         })
         .collect();
@@ -362,17 +417,23 @@ fn run_job(name: String, state: tauri::State<'_, AppState>) -> Result<(), String
     if let Ok(mut s) = state.status.lock() {
         s.error = None;
     }
-    let cmd = match name.as_str() {
-        "tail" => Command::TailUpdate,
-        "rescan" => Command::ScanAll,
-        "universe" => Command::RefreshUniverse,
-        "backfill" => Command::Backfill,
-        "full" => Command::FullSync,
-        "reload" => Command::LoadFromDisk,
-        "login" => Command::Login,
+    match name.as_str() {
+        "tail" => state.send(Command::TailUpdate),
+        "rescan" => state.send(Command::ScanAll),
+        "universe" => state.send(Command::RefreshUniverse),
+        "backfill" => state.send(Command::Backfill),
+        "full" => state.send(Command::FullSync),
+        "login" => state.send(Command::Login),
+        // `LoadFromDisk` republishes instruments and candles but leaves the
+        // detections alone, so on its own it would advance the session date and
+        // the prices while the setup list still described the previous one.
+        // "Reload" has to mean both halves or it means nothing.
+        "reload" => {
+            state.send(Command::LoadFromDisk);
+            state.send(Command::ScanAll);
+        }
         other => return Err(format!("unknown job: {other}")),
-    };
-    state.send(cmd);
+    }
     Ok(())
 }
 
@@ -465,7 +526,41 @@ fn export_stem(name: &str) -> Result<String, String> {
 // ---------------------------------------------------------------------------
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// Settle WebView2 into what a single-page local tool needs.
+///
+/// Measured, not assumed: these flags are worth about 14 MB of the roughly
+/// 410 MB the window costs, so they are **not** an answer to the memory
+/// question — that number is Chromium's baseline and no flag removes it. They
+/// are kept because a tool that reads a local SQLite file has no business
+/// running background networking or a sync client, not because they made it
+/// small. If the footprint ever matters more than the interface, the egui app
+/// is still in this repo and still builds.
+///
+/// The GPU process is deliberately left alone: the chart is a canvas, and
+/// taking its acceleration away to save a process would cost the smooth pan and
+/// zoom the rewrite was for.
+///
+/// Appended to whatever is already in the environment rather than replacing it,
+/// so `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=…` still
+/// works — which is how this window gets inspected, there being no devtools in
+/// a release build.
+///
+/// Must run before the webview is created, hence the first line of `run`.
+fn tune_webview() {
+    const KEY: &str = "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS";
+    const OURS: &str = "--disable-background-networking --disable-sync \
+                        --disable-features=msWebOOUI,msPdfOOUI";
+
+    let merged = match std::env::var(KEY) {
+        Ok(existing) if !existing.trim().is_empty() => format!("{existing} {OURS}"),
+        _ => OURS.to_string(),
+    };
+    // SAFETY: called once, at the top of `run`, before any thread is spawned.
+    unsafe { std::env::set_var(KEY, merged) };
+}
+
 pub fn run() {
+    tune_webview();
     let settings = Settings::load();
     let worker = sync::spawn(settings.clone());
     let status = Arc::new(Mutex::new(Status {
@@ -480,9 +575,9 @@ pub fn run() {
         settings: Mutex::new(settings),
     };
 
-    // Open on whatever is already stored: the app must be usable the moment the
-    // window appears, with no network and no token.
-    let _ = worker.commands.send(Command::LoadFromDisk);
+    // No start-up command is sent: the worker already loads the database and
+    // scans it before it takes its first command, so the window has data as
+    // soon as it appears. Asking again would re-read 115 MB for nothing.
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -663,7 +758,48 @@ mod tests {
         // Bar 50 rose ~5%; the last bar rose ~90%. Quoting the wrong one is loud.
         assert!(r.change_pct > 4.0 && r.change_pct < 6.0, "got {}", r.change_pct);
 
-        assert!(r.rsi > 0.0 && r.rsi <= 100.0, "an RSI must actually be computed, got {}", r.rsi);
+        // Pinned against the *other* bar's value. `r.rsi > 0` alone would pass
+        // whether or not the fix is present, which is how the regression got in.
+        let (_, rsi_at_bar_50) = context_at(&candles, 50);
+        let (_, rsi_at_last) = context_at(&candles, candles.len() - 1);
+        assert_ne!(rsi_at_bar_50, rsi_at_last, "the fixture must distinguish the two bars");
+        assert_eq!(r.rsi, rsi_at_bar_50, "the row's RSI is bar 50's");
+        assert_ne!(r.rsi, rsi_at_last, "and specifically not the newest bar's");
+    }
+
+    /// Pruning old sessions shifts every stored bar index. The row's own date
+    /// cannot drift, so that is what decides which bar it describes.
+    #[test]
+    fn a_scan_row_follows_its_date_when_stored_indices_have_shifted() {
+        // Five sessions pruned off the front: what was bar 50 is now bar 45.
+        let pruned: Vec<Candle> = series().into_iter().skip(5).collect();
+        let mut snap = shared_with(vec![instrument("ABB", true)], vec![("NSE_EQ|ABB".into(), pruned.clone())]);
+        snap.scanner = Arc::new(vec![ScanRow {
+            instrument_key: "NSE_EQ|ABB".into(),
+            symbol: "ABB".into(),
+            name: "ABB Ltd".into(),
+            date: day(50),
+            // The index the detection was stored with, now five bars out.
+            detection: Detection::new(PatternKind::ChartinkCupBreakout, 20, 50, 0.8),
+        }]);
+
+        let rows = scan_rows(&snap, None);
+        assert_eq!(rows[0].date, "2026-07-21");
+        assert_eq!(rows[0].close, 110.0, "the loud bar, found by date rather than by a stale index");
+        assert!((rows[0].volume_ratio - 3.0).abs() < 1e-9, "got {}", rows[0].volume_ratio);
+        assert_ne!(rows[0].close, pruned[50].close, "index 50 now points somewhere else entirely");
+    }
+
+    #[test]
+    fn a_stock_with_no_history_at_all_is_marked_rather_than_shown_as_current() {
+        let snap = shared_with(
+            vec![instrument("ABB", true), instrument("NEW", true)],
+            vec![("NSE_EQ|ABB".into(), series()), ("NSE_EQ|NEW".into(), Vec::new())],
+        );
+        let rows = universe_rows(&snap);
+        let newly_listed = rows.iter().find(|r| r.symbol == "NEW").expect("listed");
+        assert_eq!(newly_listed.bars, 0);
+        assert!(newly_listed.stale, "never downloaded is not the same as up to date");
     }
 
     #[test]
@@ -707,6 +843,43 @@ mod tests {
         assert_eq!(chart.markers.len(), 1, "a marker with no bar to sit on must not be drawn");
         assert_eq!(chart.markers[0].time, "2026-07-21");
         assert_eq!(chart.markers[0].start_time, "2026-06-21");
+    }
+
+    /// The engine returns detections newest-first. The chart needs the opposite:
+    /// lightweight-charts requires ascending markers, and the signal card reads
+    /// the last one as "most recent" — which showed a six-month-old setup beside
+    /// a stock that had fired that morning.
+    #[test]
+    fn markers_come_back_oldest_first_whatever_order_the_engine_used() {
+        let mut detections = HashMap::new();
+        detections.insert(
+            "NSE_EQ|ABB".to_string(),
+            vec![
+                Detection::new(PatternKind::ChartinkCupBreakout, 40, 59, 0.7),
+                Detection::new(PatternKind::ChartinkCupBreakout, 30, 50, 0.8),
+                Detection::new(PatternKind::ChartinkCupBreakout, 5, 25, 0.6),
+            ],
+        );
+        let mut snap = shared_with(vec![instrument("ABB", true)], vec![("NSE_EQ|ABB".into(), series())]);
+        snap.detections = Arc::new(detections);
+
+        let chart = chart_for(&snap, "NSE_EQ|ABB").expect("the stock exists");
+        let times: Vec<&str> = chart.markers.iter().map(|m| m.time.as_str()).collect();
+        assert_eq!(times, ["2026-06-26", "2026-07-21", "2026-07-30"]);
+        assert_eq!(
+            chart.markers.last().expect("three markers").time,
+            "2026-07-30",
+            "the newest marker must be last — the chart's signal card reads it from there"
+        );
+    }
+
+    #[test]
+    fn a_sync_time_is_shown_in_ist_and_a_broken_one_is_not_invented() {
+        // 18:15 UTC is 23:45 IST the same day.
+        assert_eq!(friendly_time("2026-08-12T18:15:30.568613500+00:00"), "12 Aug, 23:45");
+        // And past midnight IST the date must roll forward, not stay on the UTC day.
+        assert_eq!(friendly_time("2026-08-12T20:00:00+00:00"), "13 Aug, 01:30");
+        assert_eq!(friendly_time("not a timestamp"), "not a timestamp");
     }
 
     #[test]

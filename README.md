@@ -258,6 +258,11 @@ them; the React app does not yet, so change them there or edit the file:
 | Requests per second | 4 | **Global** rate cap — see below |
 | Minimum pattern score | 0.5 | Raise to cut noise in the scanner |
 
+`scan_lookback` is still in `settings.json` and is read by nothing — the scan
+covers every stored bar. It is deliberately not offered as a control: a knob
+that turns nothing is worse than no knob. It stays in the file so an existing
+config keeps parsing, and so it is not silently reused for something else.
+
 In the desktop app they live behind the **⚙** button, and the scan block is laid
 out as the Chartink scan itself — the numbers are editable in place inside the
 conditions they belong to, because a field called "depth ratio" means nothing on

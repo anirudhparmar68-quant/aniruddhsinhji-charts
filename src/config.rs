@@ -120,6 +120,10 @@ pub struct Settings {
     /// Ignore any stock whose latest close is below this (penny-stock guard).
     pub min_price: f64,
     /// Candles a pattern scan looks back over.
+    ///
+    /// Currently read by nothing: `patterns::detect_all` runs over every stored
+    /// bar. Kept so an existing `settings.json` still parses, and so the field
+    /// is not silently re-added with a different meaning later.
     pub scan_lookback: usize,
     /// Minimum score (0..1) for a detection to be listed.
     pub min_pattern_score: f64,
