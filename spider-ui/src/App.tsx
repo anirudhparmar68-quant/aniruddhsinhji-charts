@@ -27,6 +27,16 @@ const ROW_H = 46;
  *  blank band before React catches up. */
 const OVERSCAN = 6;
 
+/** How long the selection must hold still before the chart is fetched.
+ *
+ *  Holding an arrow key down used to fetch and redraw a chart for every stock
+ *  it passed through — measured at 33% of this machine's whole CPU while
+ *  stepping, on two physical cores shared with a couple of dozen broker tabs.
+ *  Only the stock you stop on is worth drawing. Sixty milliseconds is below
+ *  the threshold where a single keypress stops feeling immediate, so stepping
+ *  one at a time is unchanged. */
+const CHART_SETTLE_MS = 60;
+
 type View = "scan" | "all";
 
 type SortKey = "symbol" | "score" | "change" | "volume" | "rsi" | "date" | "close";
@@ -336,17 +346,20 @@ export default function App() {
       return;
     }
     let live = true;
-    getChart(selected)
-      .then((c) => {
-        if (live) setChart(c);
-      })
-      .catch((e) => {
-        if (live) note(`Could not load that chart: ${e}`);
-      });
+    const timer = setTimeout(() => {
+      getChart(selected)
+        .then((c) => {
+          if (live) setChart(c);
+        })
+        .catch((e) => {
+          if (live) note(`Could not load that chart: ${e}`);
+        });
+    }, CHART_SETTLE_MS);
     return () => {
       live = false;
+      clearTimeout(timer);
     };
-  }, [selected, universe]);
+  }, [selected, universe, note]);
 
   // -- keyboard ------------------------------------------------------------
   // The rows the keyboard is walking, mirrored into a ref.
