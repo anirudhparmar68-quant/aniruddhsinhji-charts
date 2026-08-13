@@ -4,7 +4,7 @@
  *  hundred selections, and a hundred round trips to the mouse is the difference
  *  between a tool and a chore. */
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import ChartPane from "./ChartPane";
 import SettingsSheet from "./SettingsSheet";
 import {
@@ -122,6 +122,65 @@ function toCsv(rows: Row[], view: View): string {
 
   return [head, ...rows.map(line)].map((cols) => cols.map(cell).join(",")).join("\r\n") + "\r\n";
 }
+
+/** One row, memoised.
+ *
+ *  Walking the list is the app's main interaction, and without this every
+ *  keypress re-rendered all ~29 rows in the window — measured at most of the
+ *  CPU a walk costs, for two rows whose highlight actually changed. The `row`
+ *  objects come from a `useMemo` and keep their identity across a selection
+ *  change, so the default shallow compare is enough: only the row losing the
+ *  highlight and the row gaining it re-render. */
+const RowLine = memo(function RowLine({
+  row,
+  selected,
+  view,
+  showDate,
+  onSelect,
+}: {
+  row: Row;
+  selected: boolean;
+  view: View;
+  showDate: boolean;
+  onSelect: (key: string) => void;
+}) {
+  return (
+    <div
+      className={`row ${selected ? "sel" : ""}`}
+      onClick={() => onSelect(row.key)}
+      title={row.name}
+    >
+      <div className="row-main">
+        <div className="row-sym">
+          {row.symbol}
+          <span className={`badge ${row.exchange.toLowerCase()}`}>{row.exchange}</span>
+          {view === "all" && row.hit && <span className="badge hit">Setup</span>}
+          {row.stale && <span className="badge stale">No trade</span>}
+        </div>
+        {/* Scanner rows show what the setup is made of; the company name is one
+            hover away and is spelled out in full in the chart header the moment
+            a row is picked. */}
+        <div className="row-name">
+          {view === "scan" ? (
+            <span className="stats num">
+              {fmt(row.volumeRatio ?? 0, 1)}× vol · RSI {fmt(row.rsi ?? 0, 0)}
+              {showDate && row.date ? ` · ${row.date}` : ""}
+            </span>
+          ) : (
+            row.name
+          )}
+        </div>
+      </div>
+      <div className="row-right">
+        <div className="row-close num">{row.close ? fmt(row.close) : "—"}</div>
+        <div className={`row-chg num ${row.changePct > 0 ? "up" : row.changePct < 0 ? "down" : "flat"}`}>
+          {row.changePct >= 0 ? "+" : ""}
+          {fmt(row.changePct)}%
+        </div>
+      </div>
+    </div>
+  );
+});
 
 /** Layout choices survive a restart. Deliberately only the layout — restoring a
  *  selected stock that has since dropped out of the scanner would land you on a
@@ -324,6 +383,9 @@ export default function App() {
     });
     return base;
   }, [view, universe, hits, query, effSort, effDesc]);
+
+  /** Stable, so a memoised row is not invalidated by a new closure each render. */
+  const pick = useCallback((key: string) => setSelected(key), []);
 
   /** Distinct stocks in the current scanner window, before any search. */
   const scanCount = useMemo(() => new Set(hits.map((h) => h.key)).size, [hits]);
@@ -701,41 +763,14 @@ export default function App() {
               <div style={{ height: rows.length * ROW_H, position: "relative" }}>
                 <div style={{ transform: `translateY(${first * ROW_H}px)` }}>
                   {slice.map((r) => (
-                    <div
+                    <RowLine
                       key={r.key}
-                      className={`row ${r.key === selected ? "sel" : ""}`}
-                      onClick={() => setSelected(r.key)}
-                      title={r.name}
-                    >
-                      <div className="row-main">
-                        <div className="row-sym">
-                          {r.symbol}
-                          <span className={`badge ${r.exchange.toLowerCase()}`}>{r.exchange}</span>
-                          {view === "all" && r.hit && <span className="badge hit">Setup</span>}
-                          {r.stale && <span className="badge stale">No trade</span>}
-                        </div>
-                        {/* Scanner rows show what the setup is made of; the
-                            company name is one hover away and is spelled out in
-                            full in the chart header the moment a row is picked. */}
-                        <div className="row-name">
-                          {view === "scan" ? (
-                            <span className="stats num">
-                              {fmt(r.volumeRatio ?? 0, 1)}× vol · RSI {fmt(r.rsi ?? 0, 0)}
-                              {windowIdx !== 0 && r.date ? ` · ${r.date}` : ""}
-                            </span>
-                          ) : (
-                            r.name
-                          )}
-                        </div>
-                      </div>
-                      <div className="row-right">
-                        <div className="row-close num">{r.close ? fmt(r.close) : "—"}</div>
-                        <div className={`row-chg num ${r.changePct > 0 ? "up" : r.changePct < 0 ? "down" : "flat"}`}>
-                          {r.changePct >= 0 ? "+" : ""}
-                          {fmt(r.changePct)}%
-                        </div>
-                      </div>
-                    </div>
+                      row={r}
+                      selected={r.key === selected}
+                      view={view}
+                      showDate={windowIdx !== 0}
+                      onSelect={pick}
+                    />
                   ))}
                 </div>
               </div>
