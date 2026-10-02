@@ -114,8 +114,10 @@ and it needs no login.
 
 ### First data load
 
-1. Credentials are already in `.env`.
-   The redirect URI must match the one registered on your Upstox app.
+1. Copy `.env.example` to `.env` (next to the `data/` folder) and fill in your Upstox
+   API key and secret from the Upstox developer console. `UPSTOX_REDIRECT_URI` must
+   match the redirect URI registered on that app exactly. `.env` is git-ignored and
+   never leaves your machine.
 
 2. Press **Full sync**. That does, in order:
    - Upstox login (opens a browser once per day; the token is cached until 03:30 IST)
