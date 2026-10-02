@@ -252,6 +252,15 @@ pub fn last_candle_date(conn: &Connection, key: &str) -> Result<Option<NaiveDate
     Ok(raw.and_then(|s| s.parse().ok()))
 }
 
+/// How many sessions are stored for one instrument.
+pub fn candle_count_for(conn: &Connection, key: &str) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM candles WHERE instrument_key = ?1",
+        [key],
+        |r| r.get(0),
+    )?)
+}
+
 pub fn candle_count(conn: &Connection) -> Result<i64> {
     Ok(conn.query_row("SELECT COUNT(*) FROM candles", [], |r| r.get(0))?)
 }
@@ -397,6 +406,16 @@ mod tests {
             close,
             volume: 1_000,
         }
+    }
+
+    #[test]
+    fn candles_are_counted_per_instrument() {
+        let mut conn = memory_db();
+        save_candles(&mut conn, "NSE_EQ|X", &[candle(1, 100.0), candle(2, 101.0), candle(3, 102.0)]).unwrap();
+        save_candles(&mut conn, "NSE_EQ|Y", &[candle(1, 50.0)]).unwrap();
+        assert_eq!(candle_count_for(&conn, "NSE_EQ|X").unwrap(), 3);
+        assert_eq!(candle_count_for(&conn, "NSE_EQ|Y").unwrap(), 1);
+        assert_eq!(candle_count_for(&conn, "NSE_EQ|NOPE").unwrap(), 0);
     }
 
     #[test]

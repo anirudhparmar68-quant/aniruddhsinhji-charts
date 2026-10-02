@@ -106,7 +106,8 @@ fn parse_candles(body: &serde_json::Value) -> Result<Vec<Candle>> {
 }
 
 /// Fetch daily candles for one instrument, retrying on throttling and transient
-/// server errors with exponential backoff.
+/// server errors with exponential backoff. An empty `token` sends the request
+/// without credentials, which Upstox accepts for this endpoint.
 pub async fn fetch_daily(
     client: &reqwest::Client,
     token: &str,
@@ -133,13 +134,13 @@ pub async fn fetch_daily(
         }
         pacer.acquire().await;
 
-        let resp = match client
-            .get(&url)
-            .bearer_auth(token)
-            .header("Accept", "application/json")
-            .send()
-            .await
-        {
+        let mut request = client.get(&url).header("Accept", "application/json");
+        // An empty token means "no Upstox login": send the request anonymously
+        // rather than a bogus `Authorization: Bearer ` header.
+        if !token.is_empty() {
+            request = request.bearer_auth(token);
+        }
+        let resp = match request.send().await {
             Ok(r) => r,
             Err(e) => {
                 last_err = Some(anyhow::anyhow!("request failed: {e}"));

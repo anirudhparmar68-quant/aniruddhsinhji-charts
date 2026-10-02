@@ -29,6 +29,10 @@ const TAIL_OVERLAP_DAYS: i64 = 30;
 /// waits is far better than one that collides.
 const WRITE_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(20 * 60);
 
+/// Fewest stored bars at which a stock counts as having its history. This is
+/// also the minimum `decide_inclusion` needs to list a stock at all.
+const MIN_HISTORY_BARS: i64 = 30;
+
 /// The app's own startup scan waits only briefly: whatever is on disk is
 /// already displayable, so blocking the window for twenty minutes to redo a
 /// scan somebody else is doing would be the wrong trade.
@@ -141,6 +145,11 @@ pub struct Shared {
     pub scanner: Arc<Vec<ScanRow>>,
     pub stats: UniverseStats,
     pub last_sync: Option<String>,
+    /// The startup load of the database has finished, whether or not it found
+    /// anything. Until then an empty snapshot means "not read yet", not "no
+    /// data", and the window must not tell an existing user that nothing is
+    /// downloaded.
+    pub loaded: bool,
     /// Newest trading session present in the data.
     ///
     /// Deliberately not "today": on a weekend, a holiday, or before the evening
@@ -402,12 +411,17 @@ impl WorkerCtx {
     }
 
     async fn full_sync(&mut self) -> Result<()> {
-        self.ensure_token().await?;
+        self.history_token().await?;
         self.refresh_universe().await?;
         self.backfill().await?;
         self.scan_all()?;
-        let conn = store::open()?;
-        store::set_meta(&conn, "last_sync", &Utc::now().to_rfc3339())?;
+        // A first sync that lost stocks to throttling or a dropped network is
+        // not finished, so it is not stamped: the "Continue download" bar stays
+        // up until a run gets through. A copy that has synced before keeps
+        // stamping as it always did.
+        if self.last_failed == 0 || snapshot(&self.state).last_sync.is_some() {
+            self.stamp_last_sync()?;
+        }
         if self.last_failed > 0 {
             self.status(format!(
                 "Sync finished, but {} stocks are still missing history — press History to retry them",
@@ -428,17 +442,27 @@ impl WorkerCtx {
     async fn tail_update(&mut self) -> Result<()> {
         let targets: Vec<Instrument> = snapshot(&self.state).instruments.as_ref().clone();
         if targets.is_empty() {
-            self.status("No instruments known yet — run a Full sync first.");
+            self.status("Nothing downloaded yet — run a Full sync first (no account needed, about 15 minutes).");
             return Ok(());
         }
 
         let written = self.bhavcopy_topup(&targets, today_ist()).await?;
         self.load_from_disk()?;
         self.scan_all()?;
-
-        let conn = store::open()?;
-        store::set_meta(&conn, "last_sync", &Utc::now().to_rfc3339())?;
+        self.stamp_last_sync()?;
         self.status(format!("Tail update complete — {written} bars refreshed"));
+        Ok(())
+    }
+
+    /// Record that a sync finished, in the database and in the snapshot the UI
+    /// reads. The snapshot only learns `last_sync` when it reloads from disk, so
+    /// stamping the database alone left it stale until the next launch, and a
+    /// fresh install looked as if its first sync had never finished.
+    fn stamp_last_sync(&self) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let conn = store::open()?;
+        store::set_meta(&conn, "last_sync", &now)?;
+        self.publish(move |shared| shared.last_sync = Some(now));
         Ok(())
     }
 
@@ -452,6 +476,26 @@ impl WorkerCtx {
         self.token = Some(token);
         self.status("Upstox token ready");
         Ok(())
+    }
+
+    /// What to send with history requests: the user's token when they have
+    /// Upstox keys, otherwise nothing.
+    ///
+    /// Upstox serves daily candles to anonymous callers (it ignores the
+    /// `Authorization` header on that endpoint), so a copy installed on a PC
+    /// with no API keys can still build its own history. A user who *does*
+    /// have keys is unaffected: the token is still fetched, and renewed through
+    /// the browser, exactly as before.
+    async fn history_token(&mut self) -> Result<String> {
+        if let Some(token) = &self.token {
+            return Ok(token.clone());
+        }
+        if Secrets::load().is_err() {
+            self.status("No Upstox login set up — using Upstox's public history feed");
+            return Ok(String::new());
+        }
+        self.ensure_token().await?;
+        Ok(self.token.clone().unwrap_or_default())
     }
 
     // -- universe ----------------------------------------------------------
@@ -482,12 +526,14 @@ impl WorkerCtx {
                 }
             }
         } else if caps.is_empty() {
-            let _ = self.events.send(Event::Error(
-                "No market caps available, so the ₹ floor cannot be applied. Export a screener \
-                 list with a market-cap column into data/mcap_overrides.csv. Until then the \
-                 universe is filtered on exchange tier, price and traded value only."
-                    .to_string(),
-            ));
+            // Not an error: it is the normal state of a fresh install, and the
+            // app works as designed. An error here sat in the status bar, in
+            // red, for the whole of a first download.
+            self.status(
+                "No market-cap list, so the universe is filtered on exchange tier, price and \
+                 traded value. To add a market-cap floor, put a screener export in \
+                 data/mcap_overrides.csv",
+            );
         }
 
         let resolved = universe::apply_market_caps(&mut instruments, &caps);
@@ -519,8 +565,7 @@ impl WorkerCtx {
     // -- history -----------------------------------------------------------
 
     async fn backfill(&mut self) -> Result<()> {
-        self.ensure_token().await?;
-        let token = self.token.clone().expect("token present after ensure_token");
+        let token = self.history_token().await?;
 
         let targets: Vec<Instrument> = snapshot(&self.state)
             .instruments
@@ -541,6 +586,14 @@ impl WorkerCtx {
         let mut jobs = Vec::with_capacity(targets.len());
         for inst in &targets {
             let from = match store::last_candle_date(&conn, &inst.instrument_key)? {
+                // A stock with only a few bars has not had its history
+                // downloaded, whatever its newest date says. An Update before the
+                // first download finished tops every stock up with the last week
+                // from bhavcopy, which would otherwise pass for "already current"
+                // here and leave it without its year for good.
+                Some(_) if store::candle_count_for(&conn, &inst.instrument_key)? < MIN_HISTORY_BARS => {
+                    earliest
+                }
                 Some(last) if last >= to => continue,
                 // Deliberately a wide overlap rather than "resume from the last
                 // stored bar". Upstox will answer a narrow tail request with a
@@ -683,6 +736,7 @@ impl WorkerCtx {
         let conn = store::open()?;
         let mut instruments = store::load_instruments(&conn, false)?;
         if instruments.is_empty() {
+            self.publish(|shared| shared.loaded = true);
             return Ok(());
         }
         self.status("Loading price history…");
@@ -743,6 +797,7 @@ impl WorkerCtx {
             shared.last_sync = last_sync;
             shared.latest_session = latest_session;
             shared.stale_count = stale_count;
+            shared.loaded = true;
         });
         let _ = self.events.send(Event::DataChanged);
 
@@ -1044,7 +1099,8 @@ fn headless_ctx(settings: Settings) -> WorkerCtx {
 }
 
 /// Full sync: instrument master, market caps, Upstox history, bhavcopy tail,
-/// scan. Needs a valid Upstox token and will open a browser without one.
+/// scan. With Upstox keys configured it uses a token and will open a browser
+/// when it has none; without keys it uses Upstox's public history feed.
 pub async fn run_headless(settings: Settings) -> Result<()> {
     let mut ctx = headless_ctx(settings);
     let Some(_lock) = WriteLock::acquire(WRITE_LOCK_WAIT, "--sync")? else {
