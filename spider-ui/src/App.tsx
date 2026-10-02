@@ -14,6 +14,7 @@ import {
   getStatus,
   getUniverse,
   onEngine,
+  openDataFolder,
   runJob,
   type ChartData,
   type Job,
@@ -598,11 +599,31 @@ export default function App() {
   }, [view, windowIdx, query]);
 
   const busy = status?.busy ?? false;
+  /** A brand-new install: nothing downloaded and nothing loaded. The list says
+   *  what to do instead of showing the same blank text a broken app would. */
+  const firstRun =
+    !!status &&
+    status.loaded &&
+    ((status.totalInstruments === 0 && universe.length === 0) || (busy && !status.lastSync));
+  /** The first download was interrupted: stocks are known but no sync ever
+   *  finished (that is what stamps `lastSync`). Without this the welcome card
+   *  is gone and nothing says the list is incomplete.
+   *
+   *  Both need `loaded`: until the startup read of the database has finished,
+   *  "nothing known" only means "not read yet", and an existing user must not be
+   *  told their data is missing. */
+  const setupUnfinished =
+    !!status && status.loaded && !busy && !status.lastSync && status.totalInstruments > 0;
   const job = (name: Job) => () => {
     setMenuOpen(false);
     note(null);
     runJob(name).catch((e) => note(String(e)));
     refreshStatus();
+  };
+
+  const showDataFolder = () => {
+    setMenuOpen(false);
+    openDataFolder().catch((e) => note(String(e)));
   };
 
   const exportRows = async () => {
@@ -654,20 +675,23 @@ export default function App() {
               <div className="menu-catch" onClick={() => setMenuOpen(false)} />
               <div className="menu">
                 <button onClick={job("full")}>
-                  Full sync<i>Login, universe, history, then scan</i>
+                  Full sync<i>Stock list, history, then scan. Needs no login.</i>
                 </button>
                 <button onClick={job("universe")}>
-                  Refresh universe<i>Re-read the instrument master and your export</i>
+                  Refresh universe<i>Re-download the NSE and BSE instrument list</i>
                 </button>
                 <button onClick={job("backfill")}>
                   Download history<i>Fetch whatever sessions are missing</i>
                 </button>
                 <button onClick={job("login")}>
-                  Upstox login<i>Opens a browser. Only needed for history.</i>
+                  Upstox login<i>Optional. Only if you have Upstox API keys in .env</i>
                 </button>
                 <div className="menu-sep" />
                 <button onClick={job("reload")}>
                   Reload from disk<i>Re-read the database, no network</i>
+                </button>
+                <button onClick={showDataFolder}>
+                  Open data folder<i>Where the database and exports are kept</i>
                 </button>
               </div>
             </>
@@ -750,15 +774,53 @@ export default function App() {
             ))}
           </div>
 
+          {setupUnfinished && (
+            <div className="setup-banner">
+              <span>Setup did not finish, so some stocks have no history yet.</span>
+              <button className="primary" onClick={job("full")}>
+                Continue download
+              </button>
+            </div>
+          )}
+
           <div className="rows" ref={rowsRef} onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}>
             {rows.length === 0 ? (
-              <div className="empty">
-                {view === "scan"
-                  ? "No breakouts in this window."
-                  : universe.length === 0
-                    ? "No stocks loaded yet."
-                    : "Nothing matches that search."}
-              </div>
+              firstRun ? (
+                <div className="empty welcome">
+                  <b>Welcome to Spider Charts</b>
+                  {busy ? (
+                    <p>
+                      Setting up. The stock list, about a year of daily history and the first
+                      scan are being downloaded. The progress is in the bar at the bottom, and
+                      the list fills in when it finishes.
+                    </p>
+                  ) : (
+                    <>
+                      <p>
+                        Nothing is downloaded yet. One click fetches the stock list, about a
+                        year of daily history and runs the first scan. It takes 10 to 15
+                        minutes and needs no account or login.
+                      </p>
+                      <button className="primary" onClick={job("full")}>
+                        Download everything
+                      </button>
+                      <p className="fine">
+                        Afterwards, press <b>Update</b> once a day after 7 pm to add the new
+                        session.
+                      </p>
+                    </>
+                  )}
+                  {status?.dataDir && <p className="fine">Your files are kept in {status.dataDir}</p>}
+                </div>
+              ) : (
+                <div className="empty">
+                  {view === "scan"
+                    ? "No breakouts in this window."
+                    : universe.length === 0
+                      ? "No stocks loaded yet."
+                      : "Nothing matches that search."}
+                </div>
+              )
             ) : (
               <div style={{ height: rows.length * ROW_H, position: "relative" }}>
                 <div style={{ transform: `translateY(${first * ROW_H}px)` }}>

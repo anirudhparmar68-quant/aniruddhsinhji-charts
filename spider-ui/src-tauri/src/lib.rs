@@ -39,6 +39,12 @@ pub struct Status {
     /// Newest error, kept until the next command starts so it cannot be missed
     /// by a user who was looking at another tab when it happened.
     pub error: Option<String>,
+    /// Folder holding this copy's `data/` and `.env`. Shown on the empty screen
+    /// so a first-time user knows where the app keeps its files.
+    pub data_dir: String,
+    /// The startup read of the database is done. Before that, "0 stocks" means
+    /// "not loaded yet", and the first-run screen must not be shown.
+    pub loaded: bool,
 }
 
 #[derive(Serialize)]
@@ -221,6 +227,8 @@ fn get_status(state: tauri::State<'_, AppState>) -> Status {
     status.stale_count = snap.stale_count;
     status.last_sync = snap.last_sync.as_deref().map(friendly_time);
     status.latest_session = snap.latest_session.map(ymd);
+    status.data_dir = spider_charts::config::project_root().display().to_string();
+    status.loaded = snap.loaded;
     status
 }
 
@@ -506,6 +514,20 @@ fn export_csv(name: String, contents: String) -> Result<String, String> {
     Ok(path.display().to_string())
 }
 
+/// Open this copy's folder in Explorer: `data/` holds the database and exports,
+/// and a `.env` for an Upstox login goes next to it.
+#[tauri::command]
+fn open_data_folder() -> Result<(), String> {
+    let data = spider_charts::config::data_dir();
+    let root = spider_charts::config::project_root();
+    // Explorer exits non-zero even when it opens fine, so only the launch is checked.
+    std::process::Command::new("explorer")
+        .arg(&root)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("opening {}: {e} (data is in {})", root.display(), data.display()))
+}
+
 /// Reduce a requested export name to something that can only ever name a file
 /// inside `data/`. Anything outside `[A-Za-z0-9_-]` becomes an underscore, so
 /// separators, drive letters and `..` cannot survive.
@@ -635,7 +657,8 @@ pub fn run() {
             get_settings,
             save_settings,
             default_settings,
-            export_csv
+            export_csv,
+            open_data_folder
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

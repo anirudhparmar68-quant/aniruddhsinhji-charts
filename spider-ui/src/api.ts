@@ -18,6 +18,10 @@ export interface Status {
   progressTotal: number;
   progressLabel: string;
   error: string | null;
+  /** Folder holding this copy's `data/` and `.env`. */
+  dataDir: string;
+  /** The startup read of the database has finished. */
+  loaded: boolean;
 }
 
 export interface Stock {
@@ -157,6 +161,10 @@ export const exportCsv = (name: string, contents: string): Promise<string> =>
   fixtures
     ? Promise.resolve(`(preview) ${name}.csv — ${contents.split("\n").length - 1} rows`)
     : invoke<string>("export_csv", { name, contents });
+
+/** Opens the app's folder in Explorer. */
+export const openDataFolder = (): Promise<void> =>
+  fixtures ? Promise.resolve() : invoke<void>("open_data_folder");
 
 /** Subscribe to every engine event. Returns the unlisten function. */
 export async function onEngine(fn: (topic: string) => void): Promise<() => void> {

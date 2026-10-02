@@ -19,6 +19,43 @@ see *Two processes, one database* below.
 
 ---
 
+## Download and install (Windows)
+
+You need no Rust, no Node and no Upstox account.
+
+1. Open the [latest release](https://github.com/anirudhparmar68-quant/aniruddhsinhji-charts/releases/latest)
+   and download **`Spider-Charts_0.1.0_x64-setup.exe`** under *Assets*.
+2. Run it. Windows will say **"Windows protected your PC"**, because the installer
+   is not code-signed (a certificate costs money). Click **More info**, then
+   **Run anyway**.
+3. Open **Spider Charts** from the Start menu. A new install is empty, so the list
+   shows a **Download everything** button. Press it. It fetches the stock list and
+   about a year of daily history from Upstox's public price feed, and runs the
+   scan. **No login, no API key.** It takes 10 to 15 minutes; the progress is in the
+   bar at the bottom.
+4. After that, press **Update** once a day after 7 pm to add the new session.
+
+The installer goes into your own user folder, so it does not ask for administrator
+rights. It needs Microsoft's **WebView2** runtime, which Windows 11 and most
+up-to-date Windows 10 PCs already have; if yours does not, the installer downloads
+it, so be online when you install.
+
+**Where your data lives.** An installed copy keeps its database in
+`%LOCALAPPDATA%\Spider Charts Data` (**More ▸ Open data folder** opens it).
+Uninstalling the program leaves that folder alone; delete it to remove everything.
+
+**What list you get.** On a fresh install there is no market-cap list, so the
+universe is every mainboard NSE and BSE stock that closes at ₹5 or more and trades
+at least ₹0.25 crore a day (1,808 stocks when measured on 2 Oct 2026), which is
+wider than a "100 crore and above" screen. To
+narrow it, put a screener export (`universe_symbols.csv`, see below) in the data
+folder and press **More ▸ Reload from disk** (or restart the app).
+
+If the download is interrupted (you closed the window, the network dropped), a
+**Continue download** bar appears over the list; it carries on from where it stopped.
+
+---
+
 ## What it does
 
 - **Universe** — driven by **your own screener export**, `data/universe_symbols.csv`.
@@ -76,6 +113,18 @@ The old egui app still builds, unchanged:
 cargo run --release
 ```
 
+**Where `data/` lives.** The first of these that applies:
+
+1. the folder named by the `SPIDER_HOME` environment variable;
+2. the exe's own folder, if it already holds a `data/` folder or a `.env` (a
+   portable copy: unzip it anywhere and it keeps its data beside it);
+3. this source checkout, when the exe was built inside it (`cargo run`,
+   `tauri dev`, the nightly job under `target\release`);
+4. `%LOCALAPPDATA%\Spider Charts Data`, which is what an installed copy uses.
+
+Rule 3 used to be the only fallback, and it pointed at the folder the program was
+*compiled* in, so an installer built on one PC looked for that path on every other.
+
 ### The desktop app
 
 Two panes, always both on screen: the list on the left, its chart on the right.
@@ -114,21 +163,27 @@ and it needs no login.
 
 ### First data load
 
-1. Copy `.env.example` to `.env` (next to the `data/` folder) and fill in your Upstox
-   API key and secret from the Upstox developer console. `UPSTOX_REDIRECT_URI` must
-   match the redirect URI registered on that app exactly. `.env` is git-ignored and
-   never leaves your machine.
+**Upstox keys are optional.** Upstox serves daily candles to anonymous callers, so
+**Full sync** (or **Download everything** on an empty install) works with no account.
+If you do have an Upstox API app, copy `.env.example` to `.env` (next to the `data/`
+folder; for an installed copy that is `%LOCALAPPDATA%\Spider Charts Data`) and fill in
+the key and secret. `UPSTOX_REDIRECT_URI` must match the redirect URI registered on
+that app exactly. With keys present the history download uses your token, exactly as
+before, and opens a browser to renew it when it has expired. `.env` is git-ignored and
+never leaves your machine.
 
-2. Press **Full sync**. That does, in order:
-   - Upstox login (opens a browser once per day; the token is cached until 03:30 IST)
+Press **Full sync**. That does, in order:
+   - Upstox login, only if `.env` has keys (opens a browser once per day; the token is
+     cached until 03:30 IST)
    - instrument master download for NSE + BSE
    - the universe decision (your export, or market cap and turnover)
    - daily history for every qualifying stock
    - the last 10 sessions re-taken from bhavcopy, which repairs any bad bars
    - a scan over everything
 
-The first backfill downloads roughly 3,000–3,500 symbols. Subsequent runs only
-fetch the missing sessions and take well under a minute.
+The first backfill downloads about 2,700 symbols (2,683 when measured on 2 Oct 2026,
+in about eleven minutes, with no login). Subsequent runs only fetch the missing
+sessions and take well under a minute.
 
 ---
 
@@ -345,8 +400,12 @@ sat at zero CPU until one was killed.
 SQLite's own busy handling does not solve this. It serialises *statements*, while
 a backfill or a scan is thousands of transactions that together mean "I am
 rewriting the database". `data/writer.lock` expresses that larger unit: whoever
-holds it is the writer, a lock left by a crash is reclaimed after 30 minutes, and
-a process that cannot get it says so rather than forcing its way in.
+holds it is the writer, and a process that cannot get it says so rather than forcing
+its way in. On Windows the holder keeps the file open with no sharing, so when a
+copy is closed or killed mid-download the OS releases it and the next one takes over
+at once. (Elsewhere a lock file untouched for 30 minutes is treated as abandoned.)
+Build the app and the headless binary together: a lock taken by a build from before
+this change is not recognised as held by a build from after it.
 
 Reading is never blocked, so opening the app during a sync is always safe.
 

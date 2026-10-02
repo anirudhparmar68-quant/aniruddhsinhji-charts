@@ -30,6 +30,11 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "publisher": "Aniruddhsinh Parmar",
+    "copyright": "Copyright (c) 2026 Aniruddhsinh Parmar",
+    "category": "Finance",
+    "shortDescription": "End-of-day charts and a breakout scanner for NSE and BSE stocks",
+    "longDescription": "Self-hosted end-of-day charting and scanning for NSE and BSE equities. Everything stays on this PC.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

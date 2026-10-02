@@ -139,6 +139,8 @@ export const status = (): Status => ({
   progressTotal: 0,
   progressLabel: "",
   error: null,
+  dataDir: "C:\Users\you\AppData\Local\Spider Charts Data",
+  loaded: true,
 });
 
 export const universe = (): Stock[] => STOCKS;
