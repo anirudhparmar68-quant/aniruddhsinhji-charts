@@ -298,6 +298,12 @@ export default function SettingsSheet({
               onChange={(b) => set({ prefer_nse: b })}
               label="Prefer NSE when a company trades on both exchanges"
             />
+            <Check
+              checked={draft.adjust_corporate_actions}
+              onChange={(b) => set({ adjust_corporate_actions: b })}
+              label="Correct old prices for splits and bonuses"
+              hint="Uses NSE's own list, so a 1:1 bonus does not show up as a 50% crash. Your downloaded prices are never changed. Demergers are marked on the chart but not corrected."
+            />
           </section>
 
           <section>

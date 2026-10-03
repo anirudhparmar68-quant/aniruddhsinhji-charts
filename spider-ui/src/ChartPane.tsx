@@ -225,15 +225,28 @@ export default function ChartPane({ data }: { data: ChartData | null }) {
       })),
     );
 
+    // Scan signals point at the candle, corporate events sit above it. Both go in
+    // one list, which the chart wants in ascending time order.
+    const signalMarkers = (data?.markers ?? []).map((m) => ({
+      time: m.time as unknown as Time,
+      position: m.direction === "Bearish" ? ("aboveBar" as const) : ("belowBar" as const),
+      color: m.direction === "Bearish" ? DOWN : UP,
+      shape: m.direction === "Bearish" ? ("arrowDown" as const) : ("arrowUp" as const),
+      text: `${(m.score * 100).toFixed(0)}%`,
+      size: 1,
+    }));
+    const eventMarkers = (data?.events ?? []).map((e) => ({
+      time: e.time as unknown as Time,
+      position: "aboveBar" as const,
+      // Amber when the earlier prices were corrected, grey when NSE gives no
+      // ratio (a demerger) and the cliff is only pointed out.
+      color: e.adjusted ? "#d6a03c" : "#8b97a7",
+      shape: "square" as const,
+      text: e.adjusted ? e.label : `${e.label} (not adjusted)`,
+      size: 1,
+    }));
     markersRef.current?.setMarkers(
-      (data?.markers ?? []).map((m) => ({
-        time: m.time as unknown as Time,
-        position: m.direction === "Bearish" ? "aboveBar" : "belowBar",
-        color: m.direction === "Bearish" ? DOWN : UP,
-        shape: m.direction === "Bearish" ? "arrowDown" : "arrowUp",
-        text: `${(m.score * 100).toFixed(0)}%`,
-        size: 1,
-      })),
+      [...signalMarkers, ...eventMarkers].sort((a, b) => String(a.time).localeCompare(String(b.time))),
     );
 
     if (bars.length) {

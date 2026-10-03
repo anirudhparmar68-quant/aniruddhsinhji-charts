@@ -158,6 +158,7 @@ export const settings = (): Settings => ({
   scan_lookback: 250,
   min_pattern_score: 0.5,
   prefer_nse: true,
+  adjust_corporate_actions: true,
   bse_groups: ["A", "B"],
   patterns: {
     chartink: {
@@ -200,6 +201,11 @@ export const chart = (key: string): ChartData | null => {
           },
         ]
       : [],
+    // One sample event on the first stock, so the preview shows the marker.
+    events:
+      s.key === STOCKS[0].key
+        ? [{ time: candles[candles.length - 40].time, label: "Bonus 1:1", adjusted: true }]
+        : [],
   };
 };
 

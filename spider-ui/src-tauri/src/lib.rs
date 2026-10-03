@@ -91,6 +91,17 @@ pub struct MarkerDto {
     pub detail: String,
 }
 
+/// A split, bonus or other corporate event on a chart.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventDto {
+    pub time: String,
+    pub label: String,
+    /// The earlier prices were corrected for it. False when NSE gives no ratio
+    /// (a demerger) and it is only flagged.
+    pub adjusted: bool,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChartDto {
@@ -100,6 +111,7 @@ pub struct ChartDto {
     pub exchange: String,
     pub candles: Vec<CandleDto>,
     pub markers: Vec<MarkerDto>,
+    pub events: Vec<EventDto>,
 }
 
 #[derive(Serialize)]
@@ -356,6 +368,15 @@ fn chart_for(snap: &sync::Shared, key: &str) -> Option<ChartDto> {
             })
             .collect(),
         markers,
+        events: snap
+            .events
+            .get(key)
+            .map(|list| {
+                list.iter()
+                    .map(|e| EventDto { time: ymd(e.date), label: e.label.clone(), adjusted: e.adjusted })
+                    .collect()
+            })
+            .unwrap_or_default(),
     })
 }
 
@@ -471,11 +492,21 @@ fn save_settings(
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
     settings.save().map_err(|e| e.to_string())?;
+    // Switching the price correction on or off only takes effect when the prices
+    // are read again, so that has to happen before the scan sees them.
+    let reload = state
+        .settings
+        .lock()
+        .map(|held| held.adjust_corporate_actions != settings.adjust_corporate_actions)
+        .unwrap_or(false);
     if let Ok(mut held) = state.settings.lock() {
         *held = settings.clone();
     }
     state.send(Command::UpdateSettings(Box::new(settings)));
-    if rescan {
+    if reload {
+        state.send(Command::LoadFromDisk);
+    }
+    if rescan || reload {
         state.send(Command::ScanAll);
     }
     Ok(())
@@ -894,6 +925,31 @@ mod tests {
             "2026-07-30",
             "the newest marker must be last — the chart's signal card reads it from there"
         );
+    }
+
+    /// A chart carries the splits, bonuses and flagged events the engine found, in
+    /// the shape the UI draws, and a stock with none carries an empty list.
+    #[test]
+    fn a_chart_carries_the_corporate_events_the_engine_found() {
+        let mut events = HashMap::new();
+        events.insert(
+            "NSE_EQ|ABB".to_string(),
+            vec![
+                spider_charts::corp::Event { date: day(10), label: "Bonus 1:1".into(), adjusted: true },
+                spider_charts::corp::Event { date: day(30), label: "Demerger".into(), adjusted: false },
+            ],
+        );
+        let mut snap = shared_with(
+            vec![instrument("ABB", true), instrument("ACC", true)],
+            vec![("NSE_EQ|ABB".into(), series()), ("NSE_EQ|ACC".into(), series())],
+        );
+        snap.events = Arc::new(events);
+
+        let abb = chart_for(&snap, "NSE_EQ|ABB").expect("the stock exists");
+        let seen: Vec<(&str, &str, bool)> =
+            abb.events.iter().map(|e| (e.time.as_str(), e.label.as_str(), e.adjusted)).collect();
+        assert_eq!(seen, [("2026-06-11", "Bonus 1:1", true), ("2026-07-01", "Demerger", false)]);
+        assert!(chart_for(&snap, "NSE_EQ|ACC").expect("the stock exists").events.is_empty());
     }
 
     #[test]

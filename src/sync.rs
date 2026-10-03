@@ -6,7 +6,7 @@
 //! it resident makes chart switching and re-scanning instant.
 
 use crate::config::{Secrets, Settings};
-use crate::model::{Candle, Instrument};
+use crate::model::{Candle, Exchange, Instrument};
 use crate::patterns::types::{Detection, Direction};
 use crate::store;
 use crate::universe::{self, MarketCaps, UniverseStats};
@@ -32,6 +32,25 @@ const WRITE_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(20 *
 /// Fewest stored bars at which a stock counts as having its history. This is
 /// also the minimum `decide_inclusion` needs to list a stock at all.
 const MIN_HISTORY_BARS: i64 = 30;
+
+/// Questions to NSE's corporate-actions service in flight at once. It answers in
+/// about a tenth of a second, so a few at a time is quick and leaves it alone.
+const CORP_CONCURRENCY: usize = 4;
+
+/// A close that fell by this ratio (10%) or rose by the other (50%) from one
+/// session to the next is the sort of move a split or bonus makes, and is worth
+/// asking NSE about at once. Genuine moves also trip it; asking costs a fraction of
+/// a second and NSE simply says there is nothing.
+const CORP_GAP_DOWN: f64 = 0.90;
+const CORP_GAP_UP: f64 = 1.5;
+/// Every stock is asked about again once this many days have passed. The price
+/// jump above misses the milder events (a 1:10 bonus is only a 9% fall), and
+/// whatever it misses, or an Update that did not run for a while, is caught here.
+/// The full pass takes about a minute and a half.
+const CORP_RECHECK_DAYS: i64 = 7;
+/// Calendar days back a price jump is looked for. It covers the bars an Update
+/// re-reads, and a few spare.
+const CORP_GAP_WINDOW_DAYS: i64 = 14;
 
 /// The app's own startup scan waits only briefly: whatever is on disk is
 /// already displayable, so blocking the window for twenty minutes to redo a
@@ -142,6 +161,8 @@ pub struct Shared {
     pub instruments: Arc<Vec<Instrument>>,
     pub candles: Arc<HashMap<String, Vec<Candle>>>,
     pub detections: Arc<HashMap<String, Vec<Detection>>>,
+    /// instrument_key -> the splits, bonuses and flagged events seen on its chart.
+    pub events: Arc<HashMap<String, Vec<crate::corp::Event>>>,
     pub scanner: Arc<Vec<ScanRow>>,
     pub stats: UniverseStats,
     pub last_sync: Option<String>,
@@ -262,6 +283,7 @@ pub fn spawn(settings: Settings) -> Worker {
                 state: worker_state,
                 events: evt_tx,
                 last_failed: 0,
+                corp_note: String::new(),
             };
             runtime.block_on(ctx.run(cmd_rx));
         })
@@ -279,6 +301,10 @@ struct WorkerCtx {
     /// Downloads that did not land on the last backfill. A sync that leaves
     /// these behind must not be reported as complete.
     last_failed: usize,
+    /// Why the splits-and-bonuses check did not fully run, if it did not. Put on
+    /// the end of the final status, because anything said during the sync is
+    /// replaced within a moment by the next line.
+    corp_note: String,
 }
 
 impl WorkerCtx {
@@ -428,7 +454,7 @@ impl WorkerCtx {
                 self.last_failed
             ));
         } else {
-            self.status("Sync complete");
+            self.status(format!("Sync complete{}", self.corp_suffix()));
         }
         Ok(())
     }
@@ -447,10 +473,11 @@ impl WorkerCtx {
         }
 
         let written = self.bhavcopy_topup(&targets, today_ist()).await?;
+        self.refresh_corporate_actions().await;
         self.load_from_disk()?;
         self.scan_all()?;
         self.stamp_last_sync()?;
-        self.status(format!("Tail update complete — {written} bars refreshed"));
+        self.status(format!("Tail update complete — {written} bars refreshed{}", self.corp_suffix()));
         Ok(())
     }
 
@@ -463,6 +490,119 @@ impl WorkerCtx {
         let conn = store::open()?;
         store::set_meta(&conn, "last_sync", &now)?;
         self.publish(move |shared| shared.last_sync = Some(now));
+        Ok(())
+    }
+
+    /// Ask NSE about splits and bonuses for the stocks that need it, and keep the
+    /// answers. The prices in the database stay raw; the answers are applied when
+    /// the data is next loaded, which both callers do straight after.
+    ///
+    /// Never fatal. If NSE is unreachable the prices stay exactly as they were
+    /// before this existed, and whatever was not asked about is tried again next
+    /// time.
+    async fn refresh_corporate_actions(&mut self) {
+        self.corp_note.clear();
+        if !self.settings.adjust_corporate_actions {
+            return;
+        }
+        if let Err(e) = self.look_up_corporate_actions().await {
+            self.corp_note = format!("splits and bonuses could not be checked: {e:#}");
+            self.status(format!("Could not check NSE for splits and bonuses ({e:#}), so prices stay as they are"));
+        }
+    }
+
+    /// What to add to the end of a finished sync's status when the NSE check
+    /// did not fully run.
+    fn corp_suffix(&self) -> String {
+        if self.corp_note.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", self.corp_note)
+        }
+    }
+
+    /// The stocks to ask about: every NSE stock in the universe NSE has not been
+    /// asked about yet (the first time, and for stocks added later), plus any whose
+    /// price jumped recently, which is how a new split or bonus shows itself.
+    async fn look_up_corporate_actions(&mut self) -> Result<()> {
+        let snap = snapshot(&self.state);
+        let mut wanted: Vec<String> = Vec::new();
+        {
+            let conn = store::open()?;
+            // Not asked about for a week counts as not asked: see CORP_RECHECK_DAYS.
+            let checked = store::corp_checked_since(&conn, today_ist() - Duration::days(CORP_RECHECK_DAYS))?;
+            let recent = store::gap_candidates(
+                &conn,
+                today_ist() - Duration::days(CORP_GAP_WINDOW_DAYS),
+                CORP_GAP_DOWN,
+                CORP_GAP_UP,
+            )?;
+            let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            for inst in snap.instruments.iter().filter(|i| i.included && i.exchange == Exchange::Nse) {
+                if !checked.contains(&inst.symbol) && seen.insert(&inst.symbol) {
+                    wanted.push(inst.symbol.clone());
+                }
+            }
+            for symbol in recent {
+                if !wanted.contains(&symbol) {
+                    wanted.push(symbol);
+                }
+            }
+        }
+        if wanted.is_empty() {
+            return Ok(());
+        }
+
+        let total = wanted.len();
+        self.status(format!("Checking NSE for splits and bonuses ({total} stocks)…"));
+        let nse = Arc::new(crate::corp::NseMcp::new(self.client.clone()));
+        let mut answers = stream::iter(wanted.into_iter().map(|symbol| {
+            let nse = Arc::clone(&nse);
+            async move {
+                let reply = nse.actions(&symbol).await;
+                (symbol, reply)
+            }
+        }))
+        .buffer_unordered(CORP_CONCURRENCY);
+
+        let mut conn = store::open()?;
+        let today = today_ist();
+        let (mut done, mut failed, mut in_a_row) = (0usize, 0usize, 0usize);
+        while let Some((symbol, reply)) = answers.next().await {
+            done += 1;
+            match reply {
+                Ok(actions) => {
+                    in_a_row = 0;
+                    store::replace_corp_actions(&mut conn, &symbol, &actions, today)?;
+                }
+                Err(_) => {
+                    failed += 1;
+                    in_a_row += 1;
+                    // Ten in a row means the service is down, not that ten stocks
+                    // are odd: stop, rather than wait out two thousand time-outs.
+                    if in_a_row >= 10 {
+                        break;
+                    }
+                }
+            }
+            if done % 50 == 0 || done == total {
+                self.progress(done, total, format!("splits and bonuses · {symbol}"));
+            }
+        }
+
+        if failed > 0 {
+            // Counted from what was answered, not from the failures seen: after the
+            // service is given up on, the stocks never asked about are unanswered too.
+            let unanswered = total - (done - failed);
+            self.corp_note = format!(
+                "NSE did not answer for {unanswered} stocks, so their splits and bonuses are not corrected yet"
+            );
+            self.status(format!(
+                "NSE did not answer for {unanswered} stocks; splits and bonuses for those are tried again next time"
+            ));
+        } else {
+            self.status(format!("Checked {total} stocks with NSE for splits and bonuses"));
+        }
         Ok(())
     }
 
@@ -648,10 +788,31 @@ impl WorkerCtx {
         let mut conn = store::open()?;
         let (mut ok, mut empty, mut failed, mut done) = (0usize, 0usize, 0usize, 0usize);
 
+        let mut revised = 0usize;
         while let Some((inst, result)) = stream.next().await {
             done += 1;
             match result {
                 Ok(history::FetchOutcome::Candles(candles)) => {
+                    // Upstox corrects a stock's whole history after a split or bonus,
+                    // but a top-up only re-reads the last month. If that month no
+                    // longer matches what is stored, the older bars would be left
+                    // on a different footing, with a false cliff where the two
+                    // meet, so the whole history is fetched again.
+                    let mut candles = candles;
+                    if let Some(first) = candles.first() {
+                        let was = store::close_on(&conn, &inst.instrument_key, first.date)?;
+                        let changed = matches!(was, Some(old) if old > 0.0 && first.close > 0.0
+                            && !(0.9..=1.1).contains(&(first.close / old)));
+                        if changed && first.date > earliest {
+                            let key = &inst.instrument_key;
+                            if let Ok(history::FetchOutcome::Candles(full)) =
+                                history::fetch_daily(&client, &token, &pacer, key, earliest, to).await
+                            {
+                                candles = full;
+                                revised += 1;
+                            }
+                        }
+                    }
                     store::save_candles(&mut conn, &inst.instrument_key, &candles)?;
                     ok += 1;
                 }
@@ -682,10 +843,15 @@ impl WorkerCtx {
                  stocks are retried. If it keeps happening, lower “Requests per second” in Settings."
             )));
         }
-        self.status(format!(
-            "History: {ok} downloaded, {empty} with no data, {failed} failed"
-        ));
+        let mut summary = format!("History: {ok} downloaded, {empty} with no data, {failed} failed");
+        if revised > 0 {
+            summary.push_str(&format!(
+                ", {revised} re-read in full because Upstox had corrected their history"
+            ));
+        }
+        self.status(summary);
 
+        self.refresh_corporate_actions().await;
         self.load_from_disk()?;
         Ok(())
     }
@@ -756,7 +922,26 @@ impl WorkerCtx {
         }
         self.status("Loading price history…");
 
-        let candles = store::load_all_candles(&conn)?;
+        let mut candles = store::load_all_candles(&conn)?;
+
+        // Correct the raw prices for splits and bonuses before anything reads them:
+        // the universe guards, the scan and the chart all see the corrected series.
+        // The database is not touched, so this is repeatable and can be turned off.
+        let mut events: HashMap<String, Vec<crate::corp::Event>> = HashMap::new();
+        if self.settings.adjust_corporate_actions {
+            let actions = store::load_corp_actions(&conn)?;
+            for inst in instruments.iter().filter(|i| i.exchange == crate::model::Exchange::Nse) {
+                let (Some(list), Some(series)) =
+                    (actions.get(&inst.symbol), candles.get_mut(&inst.instrument_key))
+                else {
+                    continue;
+                };
+                let seen = crate::corp::apply(series, list);
+                if !seen.is_empty() {
+                    events.insert(inst.instrument_key.clone(), seen);
+                }
+            }
+        }
 
         // Final inclusion now that we can see liquidity and price.
         let allowlist = universe::Allowlist::load().unwrap_or_default();
@@ -808,6 +993,7 @@ impl WorkerCtx {
         self.publish(move |shared| {
             shared.instruments = Arc::new(instruments);
             shared.candles = Arc::new(candles);
+            shared.events = Arc::new(events);
             shared.stats = stats;
             shared.last_sync = last_sync;
             shared.latest_session = latest_session;
@@ -1113,6 +1299,7 @@ fn headless_ctx(settings: Settings) -> WorkerCtx {
         state: Arc::new(RwLock::new(Arc::new(Shared::default()))),
         events: evt_tx,
         last_failed: 0,
+        corp_note: String::new(),
     }
 }
 

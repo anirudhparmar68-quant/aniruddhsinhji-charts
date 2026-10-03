@@ -6,6 +6,7 @@
 
 pub mod bhavcopy;
 pub mod config;
+pub mod corp;
 pub mod model;
 pub mod patterns;
 pub mod store;

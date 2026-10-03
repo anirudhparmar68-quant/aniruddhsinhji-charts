@@ -42,6 +42,24 @@ CREATE TABLE IF NOT EXISTS detections (
 CREATE INDEX IF NOT EXISTS idx_detections_date ON detections(d);
 
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+
+-- Splits, bonuses and flagged events NSE lists for a symbol. Prices in `candles`
+-- stay raw; these are applied in memory when the data is loaded.
+CREATE TABLE IF NOT EXISTS corp_actions (
+    symbol  TEXT NOT NULL,
+    ex_date TEXT NOT NULL,
+    kind    TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    factor  REAL NOT NULL,
+    PRIMARY KEY (symbol, ex_date, kind, purpose)
+) WITHOUT ROWID;
+
+-- Symbols NSE has been asked about, so each is looked up once and after that only
+-- when a price gap suggests something new.
+CREATE TABLE IF NOT EXISTS corp_checked (
+    symbol     TEXT PRIMARY KEY,
+    checked_on TEXT NOT NULL
+) WITHOUT ROWID;
 "#;
 
 pub fn open() -> Result<Connection> {
@@ -252,6 +270,121 @@ pub fn last_candle_date(conn: &Connection, key: &str) -> Result<Option<NaiveDate
     Ok(raw.and_then(|s| s.parse().ok()))
 }
 
+// ---------------------------------------------------------------------------
+// Corporate actions
+// ---------------------------------------------------------------------------
+
+/// Record what NSE listed for `symbol`, and note that it has been asked.
+///
+/// This adds to what is stored and never removes. A stored event is only replaced
+/// by NSE's newer wording for the *same ex-date*; one the answer leaves out stays.
+/// NSE's answers are not always complete (an empty one for a symbol it could not
+/// look up is indistinguishable from a stock with no events), and wiping a stock's
+/// stored splits on the strength of one would put a cliff back in its chart.
+pub fn replace_corp_actions(
+    conn: &mut Connection,
+    symbol: &str,
+    actions: &[crate::corp::Action],
+    today: NaiveDate,
+) -> Result<()> {
+    let tx = conn.transaction()?;
+    for a in actions {
+        tx.execute(
+            "DELETE FROM corp_actions WHERE symbol = ?1 AND ex_date = ?2",
+            params![symbol, a.ex_date.to_string()],
+        )?;
+    }
+    {
+        let mut stmt = tx.prepare(
+            "INSERT OR REPLACE INTO corp_actions (symbol, ex_date, kind, purpose, factor)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )?;
+        for a in actions {
+            stmt.execute(params![symbol, a.ex_date.to_string(), a.kind.as_str(), a.purpose, a.factor])?;
+        }
+    }
+    tx.execute(
+        "INSERT INTO corp_checked (symbol, checked_on) VALUES (?1, ?2)
+         ON CONFLICT(symbol) DO UPDATE SET checked_on = excluded.checked_on",
+        params![symbol, today.to_string()],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Everything stored, by symbol, oldest ex-date first.
+pub fn load_corp_actions(
+    conn: &Connection,
+) -> Result<std::collections::HashMap<String, Vec<crate::corp::Action>>> {
+    let mut stmt = conn.prepare(
+        "SELECT symbol, ex_date, kind, purpose, factor FROM corp_actions ORDER BY symbol, ex_date",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let date: String = row.get(1)?;
+        let kind: String = row.get(2)?;
+        Ok((
+            row.get::<_, String>(0)?,
+            date,
+            crate::corp::Kind::parse(&kind),
+            row.get::<_, String>(3)?,
+            row.get::<_, f64>(4)?,
+        ))
+    })?;
+    let mut out: std::collections::HashMap<String, Vec<crate::corp::Action>> = Default::default();
+    for row in rows {
+        let (symbol, date, kind, purpose, factor) = row?;
+        // A row whose date cannot be read is skipped, not fatal: the rest of the
+        // stock's events are still good.
+        if let Ok(ex_date) = date.parse() {
+            out.entry(symbol).or_default().push(crate::corp::Action { ex_date, kind, purpose, factor });
+        }
+    }
+    Ok(out)
+}
+
+/// Symbols NSE was asked about on or after `since`. Anything not in here is due to
+/// be asked again, which is how an event too mild to show as a price jump (a 1:10
+/// bonus is a 9% fall) is found in the end.
+pub fn corp_checked_since(conn: &Connection, since: NaiveDate) -> Result<std::collections::HashSet<String>> {
+    let mut stmt = conn.prepare("SELECT symbol FROM corp_checked WHERE checked_on >= ?1")?;
+    let rows = stmt.query_map([since.to_string()], |row| row.get::<_, String>(0))?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+/// The stored close of one instrument on one session, if there is one.
+pub fn close_on(conn: &Connection, key: &str, date: NaiveDate) -> Result<Option<f64>> {
+    Ok(conn
+        .query_row(
+            "SELECT c FROM candles WHERE instrument_key = ?1 AND d = ?2",
+            params![key, date.to_string()],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+/// NSE symbols of listed stocks whose close moved by at least `down` (a ratio such
+/// as 0.9, meaning a 10% fall) or `up` (such as 1.5) from one session to the next,
+/// on or after `since`. Those are the ones worth asking NSE about again.
+pub fn gap_candidates(conn: &Connection, since: NaiveDate, down: f64, up: f64) -> Result<Vec<String>> {
+    // The window function needs the session before `since` to measure the first
+    // day's move, so it reads a little further back than it reports.
+    let from = since - chrono::Duration::days(10);
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT i.symbol FROM (
+             SELECT instrument_key, d, c,
+                    LAG(c) OVER (PARTITION BY instrument_key ORDER BY d) AS prev_c
+             FROM candles WHERE d >= ?1
+         ) a JOIN instruments i ON i.instrument_key = a.instrument_key
+         WHERE a.prev_c > 0 AND a.d >= ?2 AND i.exchange = 'NSE' AND i.included = 1
+           AND (a.c / a.prev_c <= ?3 OR a.c / a.prev_c >= ?4)
+         ORDER BY i.symbol",
+    )?;
+    let rows = stmt.query_map(params![from.to_string(), since.to_string(), down, up], |row| {
+        row.get::<_, String>(0)
+    })?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
 /// How many sessions are stored for one instrument.
 pub fn candle_count_for(conn: &Connection, key: &str) -> Result<i64> {
     Ok(conn.query_row(
@@ -406,6 +539,118 @@ mod tests {
             close,
             volume: 1_000,
         }
+    }
+
+    fn nse_stock(key: &str, symbol: &str, included: bool) -> Instrument {
+        Instrument {
+            instrument_key: key.into(),
+            symbol: symbol.into(),
+            name: symbol.into(),
+            isin: String::new(),
+            exchange: Exchange::Nse,
+            mcap_cr: None,
+            included,
+        }
+    }
+
+    fn action(day: u32, kind: crate::corp::Kind, purpose: &str, factor: f64) -> crate::corp::Action {
+        crate::corp::Action {
+            ex_date: NaiveDate::from_ymd_opt(2025, 8, day).unwrap(),
+            kind,
+            purpose: purpose.into(),
+            factor,
+        }
+    }
+
+    #[test]
+    fn corporate_actions_round_trip_and_are_replaced_not_piled_up() {
+        use crate::corp::Kind;
+        let mut conn = memory_db();
+        let today = NaiveDate::from_ymd_opt(2025, 9, 1).unwrap();
+
+        replace_corp_actions(&mut conn, "AASTHA", &[action(28, Kind::Bonus, "Bonus 1:1", 0.5)], today).unwrap();
+        replace_corp_actions(&mut conn, "VEDL", &[action(30, Kind::Demerger, "Demerger", 1.0)], today).unwrap();
+        let stored = load_corp_actions(&conn).unwrap();
+        assert_eq!(stored["AASTHA"], vec![action(28, Kind::Bonus, "Bonus 1:1", 0.5)]);
+        assert_eq!(stored["VEDL"][0].kind, Kind::Demerger);
+
+        // An empty answer removes nothing: NSE's answers are not always complete.
+        replace_corp_actions(&mut conn, "AASTHA", &[], today).unwrap();
+        assert_eq!(load_corp_actions(&conn).unwrap()["AASTHA"].len(), 1);
+
+        // Newer wording for the same ex-date replaces the old, not piles up.
+        replace_corp_actions(&mut conn, "AASTHA", &[action(28, Kind::Bonus, "Bonus 1:1 (revised)", 0.5)], today)
+            .unwrap();
+        let aastha = &load_corp_actions(&conn).unwrap()["AASTHA"];
+        assert_eq!(aastha.len(), 1);
+        assert_eq!(aastha[0].purpose, "Bonus 1:1 (revised)");
+        assert!(load_corp_actions(&conn).unwrap().contains_key("VEDL"), "other symbols are untouched");
+    }
+
+    #[test]
+    fn symbols_are_due_again_when_they_were_last_asked_about_long_ago() {
+        let mut conn = memory_db();
+        let d = |m, day| NaiveDate::from_ymd_opt(2025, m, day).unwrap();
+        replace_corp_actions(&mut conn, "OLD", &[], d(8, 1)).unwrap();
+        replace_corp_actions(&mut conn, "NEW", &[], d(9, 1)).unwrap();
+        let fresh = corp_checked_since(&conn, d(8, 25)).unwrap();
+        assert!(fresh.contains("NEW") && !fresh.contains("OLD"));
+    }
+
+    #[test]
+    fn a_stored_close_can_be_looked_up_by_date() {
+        let mut conn = memory_db();
+        save_candles(&mut conn, "K", &[candle(1, 100.0), candle(2, 101.0)]).unwrap();
+        let d = |day| NaiveDate::from_ymd_opt(2025, 8, day).unwrap();
+        assert_eq!(close_on(&conn, "K", d(2)).unwrap(), Some(101.0));
+        assert_eq!(close_on(&conn, "K", d(9)).unwrap(), None);
+        assert_eq!(close_on(&conn, "NOPE", d(1)).unwrap(), None);
+    }
+
+    #[test]
+    fn a_symbol_with_no_actions_still_counts_as_checked() {
+        let mut conn = memory_db();
+        let today = NaiveDate::from_ymd_opt(2025, 9, 1).unwrap();
+        assert!(corp_checked_since(&conn, today).unwrap().is_empty());
+        replace_corp_actions(&mut conn, "TCS", &[], today).unwrap();
+        assert!(corp_checked_since(&conn, today).unwrap().contains("TCS"));
+    }
+
+    #[test]
+    fn gap_candidates_are_the_listed_nse_stocks_that_jumped_recently() {
+        let mut conn = memory_db();
+        save_instruments(
+            &mut conn,
+            &[
+                nse_stock("K1", "HALVED", true),
+                nse_stock("K2", "STEADY", true),
+                nse_stock("K3", "OUTSIDE", false),
+                nse_stock("K4", "OLDGAP", true),
+                nse_stock("K5", "DOUBLED", true),
+            ],
+        )
+        .unwrap();
+        // Sessions 1..=10 of Aug 2025. HALVED falls 50% on the 9th, OLDGAP did on
+        // the 3rd, DOUBLED rises 120% on the 10th, OUTSIDE is not in the universe.
+        for (key, f) in [
+            ("K1", (|d: u32| if d >= 9 { 50.0 } else { 100.0 }) as fn(u32) -> f64),
+            ("K2", |_| 100.0),
+            ("K3", |d| if d >= 9 { 50.0 } else { 100.0 }),
+            ("K4", |d| if d >= 3 { 50.0 } else { 100.0 }),
+            ("K5", |d| if d >= 10 { 220.0 } else { 100.0 }),
+        ] {
+            let bars: Vec<Candle> = (1..=10).map(|d| candle(d, f(d))).collect();
+            save_candles(&mut conn, key, &bars).unwrap();
+        }
+
+        let since = NaiveDate::from_ymd_opt(2025, 8, 8).unwrap();
+        let found = gap_candidates(&conn, since, 0.9, 1.5).unwrap();
+        assert_eq!(found, vec!["DOUBLED".to_string(), "HALVED".to_string()]);
+
+        // A wider window picks up the older gap too.
+        let since = NaiveDate::from_ymd_opt(2025, 8, 1).unwrap();
+        let found = gap_candidates(&conn, since, 0.9, 1.5).unwrap();
+        assert_eq!(found, vec!["DOUBLED".to_string(), "HALVED".to_string(), "OLDGAP".to_string()]);
     }
 
     #[test]

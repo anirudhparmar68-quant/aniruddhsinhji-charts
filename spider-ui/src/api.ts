@@ -58,6 +58,14 @@ export interface Marker {
   detail: string;
 }
 
+/** A split, bonus or other corporate event drawn on a chart. */
+export interface CorpEvent {
+  time: string;
+  label: string;
+  /** Earlier prices were corrected for it. False when it is only flagged. */
+  adjusted: boolean;
+}
+
 export interface ChartData {
   key: string;
   symbol: string;
@@ -65,6 +73,7 @@ export interface ChartData {
   exchange: string;
   candles: Bar[];
   markers: Marker[];
+  events: CorpEvent[];
 }
 
 export interface ScanHit {
@@ -113,6 +122,7 @@ export interface Settings {
   scan_lookback: number;
   min_pattern_score: number;
   prefer_nse: boolean;
+  adjust_corporate_actions: boolean;
   bse_groups: string[];
   patterns: { chartink: CupParams };
 }

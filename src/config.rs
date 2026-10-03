@@ -194,6 +194,10 @@ pub struct Settings {
     pub min_pattern_score: f64,
     /// Exchange preference when the same ISIN trades on both.
     pub prefer_nse: bool,
+    /// Correct earlier prices for splits and bonuses, using what NSE lists. The
+    /// raw prices in the database are never changed; this only decides whether
+    /// the correction is applied when they are loaded.
+    pub adjust_corporate_actions: bool,
     /// BSE group codes treated as mainboard equity. BSE reports a group where
     /// NSE reports an instrument type; A and B are the mainboard tiers, while
     /// T/X/XT/Z are surveillance or illiquid and M/MT/MS are the SME platform.
@@ -216,6 +220,7 @@ impl Default for Settings {
             scan_lookback: 250,
             min_pattern_score: 0.5,
             prefer_nse: true,
+            adjust_corporate_actions: true,
             bse_groups: crate::upstox::instruments::DEFAULT_BSE_GROUPS
                 .iter()
                 .map(|s| s.to_string())
