@@ -501,6 +501,19 @@ impl WorkerCtx {
     // -- universe ----------------------------------------------------------
 
     async fn refresh_universe(&mut self) -> Result<()> {
+        // A brand-new install has no stock list of its own and, unlike the
+        // author, no screener to export one from, so it gets the built-in one.
+        // Only while nothing is stored yet: someone who deleted the file to widen
+        // the universe must not find it back every time they refresh.
+        if snapshot(&self.state).instruments.is_empty() {
+            match universe::seed_default_allowlist() {
+                Ok(true) => self.status("Using the built-in list of stocks above 100 crore market cap"),
+                Ok(false) => {}
+                Err(e) => self.status(format!(
+                    "Could not write the built-in stock list ({e:#}), so the liquidity filter applies"
+                )),
+            }
+        }
         self.status("Downloading the NSE + BSE instrument master…");
         let mut instruments =
             instr::load_equities(&self.client, self.settings.prefer_nse, &self.settings.bse_groups)
@@ -543,8 +556,9 @@ impl WorkerCtx {
         }
 
         // Provisional inclusion so the sidebar is usable before any history lands.
+        let allowlist = universe::Allowlist::load().unwrap_or_default();
         for inst in instruments.iter_mut() {
-            inst.included = universe::worth_downloading(inst, &self.settings);
+            inst.included = universe::worth_downloading(inst, &self.settings, &allowlist);
         }
         stats.passed_on_mcap = instruments
             .iter()
@@ -567,10 +581,11 @@ impl WorkerCtx {
     async fn backfill(&mut self) -> Result<()> {
         let token = self.history_token().await?;
 
+        let allowlist = universe::Allowlist::load().unwrap_or_default();
         let targets: Vec<Instrument> = snapshot(&self.state)
             .instruments
             .iter()
-            .filter(|i| universe::worth_downloading(i, &self.settings))
+            .filter(|i| universe::worth_downloading(i, &self.settings, &allowlist))
             .cloned()
             .collect();
         if targets.is_empty() {
@@ -747,7 +762,7 @@ impl WorkerCtx {
         let allowlist = universe::Allowlist::load().unwrap_or_default();
         if !allowlist.is_empty() {
             self.status(format!(
-                "Universe restricted to your {} listed symbols",
+                "Universe restricted to the {} symbols in universe_symbols.csv",
                 allowlist.len()
             ));
         }
@@ -1029,7 +1044,10 @@ pub async fn run_universe_check(settings: Settings) -> Result<()> {
     println!("  unresolved market cap : {unknown}  (judged on traded value after a backfill)");
     println!(
         "  would be downloaded   : {}",
-        instruments.iter().filter(|i| universe::worth_downloading(i, &settings)).count()
+        {
+            let allowlist = universe::Allowlist::load().unwrap_or_default();
+            instruments.iter().filter(|i| universe::worth_downloading(i, &settings, &allowlist)).count()
+        }
     );
 
     if resolved == 0 {

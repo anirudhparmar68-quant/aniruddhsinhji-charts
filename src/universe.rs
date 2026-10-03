@@ -20,6 +20,32 @@ use std::collections::HashMap;
 const OVERRIDES_FILE: &str = "mcap_overrides.csv";
 const ALLOWLIST_FILE: &str = "universe_symbols.csv";
 
+/// Stocks above 100 crore market cap, from the author's screener export of
+/// 12 Aug 2026, built into the program.
+///
+/// The list is a screener export, and someone who installs the app has no
+/// screener to make one with. Without this they would get only the liquidity
+/// filter, a different and wider universe than the one the app was built around.
+/// It is a snapshot and ages; `data/universe_symbols.csv` always wins over it.
+const DEFAULT_ALLOWLIST: &str = include_str!("../defaults/universe_symbols.csv");
+
+/// Put the built-in list at `<dir>/universe_symbols.csv`. Returns whether it
+/// wrote anything. It never replaces a file that is already there.
+pub fn seed_default_allowlist_in(dir: &std::path::Path) -> Result<bool> {
+    let path = dir.join(ALLOWLIST_FILE);
+    if path.exists() {
+        return Ok(false);
+    }
+    std::fs::write(&path, DEFAULT_ALLOWLIST)
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(true)
+}
+
+/// [`seed_default_allowlist_in`] for this copy's own data folder.
+pub fn seed_default_allowlist() -> Result<bool> {
+    seed_default_allowlist_in(&data_dir())
+}
+
 /// Symbols the universe is restricted to, when the user supplies a list.
 ///
 /// A screener export is the practical way to express "market cap above ₹100
@@ -365,9 +391,15 @@ pub fn apply_market_caps(instruments: &mut [Instrument], caps: &MarketCaps) -> u
 
 /// Should we bother downloading history for this name?
 ///
-/// Deliberately generous: anything clearing the market-cap floor, plus anything
-/// whose market cap we could not resolve (it gets judged on turnover later).
-pub fn worth_downloading(inst: &Instrument, settings: &Settings) -> bool {
+/// A supplied list is authoritative, exactly as in [`decide_inclusion`]: fetching
+/// a year of history for a stock the list excludes would be thrown away at once.
+/// Without a list it is deliberately generous: anything clearing the market-cap
+/// floor, plus anything whose market cap we could not resolve (it gets judged on
+/// turnover later).
+pub fn worth_downloading(inst: &Instrument, settings: &Settings, allowlist: &Allowlist) -> bool {
+    if !allowlist.is_empty() {
+        return allowlist.contains(&inst.symbol);
+    }
     match inst.mcap_cr {
         Some(mcap) => mcap >= settings.min_mcap_cr,
         None => settings.include_unknown_mcap,
@@ -566,7 +598,49 @@ mod tests {
         let s = Settings { include_unknown_mcap: false, ..Settings::default() };
         let liquid = candles(60, 100.0, 100_000);
         assert!(!decide_inclusion(&inst("UNKNOWN", "I5", None), &liquid, &s, &no_list()));
-        assert!(!worth_downloading(&inst("UNKNOWN", "I5", None), &s));
+        assert!(!worth_downloading(&inst("UNKNOWN", "I5", None), &s, &no_list()));
+    }
+
+    #[test]
+    fn a_supplied_list_decides_what_is_worth_downloading() {
+        let s = Settings::default();
+        let list = Allowlist::parse("symbol\nLISTED\n").unwrap();
+        let named = |symbol: &str, mcap: Option<f64>| Instrument { symbol: symbol.into(), ..inst("X", "I7", mcap) };
+        // Membership wins in both directions: an unknown market cap is not
+        // enough, and a big one is not either.
+        assert!(worth_downloading(&named("LISTED", None), &s, &list));
+        assert!(!worth_downloading(&named("OTHER", Some(50_000.0)), &s, &list));
+        assert!(worth_downloading(&named("OTHER", Some(50_000.0)), &s, &no_list()));
+    }
+
+    #[test]
+    fn the_built_in_list_parses_and_looks_like_the_real_thing() {
+        let list = Allowlist::parse(DEFAULT_ALLOWLIST).unwrap();
+        assert!(
+            (2_000..2_500).contains(&list.len()),
+            "a 100 crore screen of NSE and BSE is about 2,100 names, got {}",
+            list.len()
+        );
+        for known in ["RELIANCE", "TCS", "INFY", "20MICRONS"] {
+            assert!(list.contains(known), "{known} should be in the built-in list");
+        }
+        assert!(!list.contains("SYMBOL"), "the header row is not a stock");
+    }
+
+    #[test]
+    fn seeding_writes_the_list_once_and_never_replaces_a_file() {
+        let dir = std::env::temp_dir().join(format!("spider-seed-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        assert!(seed_default_allowlist_in(&dir).unwrap(), "an empty folder gets the list");
+        let path = dir.join(ALLOWLIST_FILE);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), DEFAULT_ALLOWLIST);
+
+        std::fs::write(&path, "symbol\nMINE\n").unwrap();
+        assert!(!seed_default_allowlist_in(&dir).unwrap(), "a file that exists is left alone");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "symbol\nMINE\n");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

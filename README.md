@@ -24,7 +24,7 @@ see *Two processes, one database* below.
 You need no Rust, no Node and no Upstox account.
 
 1. Open the [latest release](https://github.com/anirudhparmar68-quant/aniruddhsinhji-charts/releases/latest)
-   and download **`Spider-Charts_0.1.0_x64-setup.exe`** under *Assets*.
+   and download **`Spider-Charts_0.1.1_x64-setup.exe`** under *Assets*.
 2. Run it. Windows will say **"Windows protected your PC"**, because the installer
    is not code-signed (a certificate costs money). Click **More info**, then
    **Run anyway**.
@@ -44,15 +44,52 @@ it, so be online when you install.
 `%LOCALAPPDATA%\Spider Charts Data` (**More ▸ Open data folder** opens it).
 Uninstalling the program leaves that folder alone; delete it to remove everything.
 
-**What list you get.** On a fresh install there is no market-cap list, so the
-universe is every mainboard NSE and BSE stock that closes at ₹5 or more and trades
-at least ₹0.25 crore a day (1,808 stocks when measured on 2 Oct 2026), which is
-wider than a "100 crore and above" screen. To
-narrow it, put a screener export (`universe_symbols.csv`, see below) in the data
-folder and press **More ▸ Reload from disk** (or restart the app).
+**What list you get.** The program carries the author's list of stocks above
+₹100 crore market cap, symbols only, from a screener export of **12 Aug 2026**
+([`defaults/universe_symbols.csv`](defaults/universe_symbols.csv)). On the first
+download it is copied into your data folder as `universe_symbols.csv`, so you get
+the same universe of about 2,100 stocks without needing a screener account, and
+only those stocks are downloaded.
+
+It is a snapshot, so it ages: stocks that have crossed ₹100 crore since, and new
+listings, are missing. To refresh it, replace `universe_symbols.csv` in the data
+folder with a fresh export (one `symbol` column is enough) and press
+**More ▸ Reload from disk**. To drop it and use the liquidity rules instead (every
+mainboard stock closing at ₹5 or more and trading at least ₹0.25 crore a day,
+about 1,800 stocks), delete the file; it is only ever put there on a brand-new
+install, so it will not come back.
 
 If the download is interrupted (you closed the window, the network dropped), a
 **Continue download** bar appears over the list; it carries on from where it stopped.
+
+---
+
+## Run it from the source code
+
+For someone who has cloned the repository instead of downloading the installer.
+You need **Git**, **Rust** (from [rustup.rs](https://rustup.rs), with the Visual
+Studio C++ Build Tools it asks for), **Node.js 20.19 or newer**, and Microsoft
+**WebView2** (already on Windows 11). You do **not** need an Upstox account.
+
+```bash
+git clone https://github.com/anirudhparmar68-quant/aniruddhsinhji-charts.git
+```
+
+```bash
+cd aniruddhsinhji-charts
+```
+
+```bash
+npm install --prefix spider-ui
+```
+
+```bash
+npm run tauri dev --prefix spider-ui
+```
+
+The first build takes several minutes. When the window opens it is empty, so press
+**Download everything**, exactly as in the installed copy. The data goes into a
+`data/` folder inside the checkout, which Git ignores.
 
 ---
 
@@ -64,7 +101,9 @@ If the download is interrupted (you closed the window, the network dropped), a
   to use. Listed **alphabetically**. Currently **2,115** stocks matched out of
   the 2,161 symbols in the export — the rest are not in Upstox's instrument dump
   at all, which was verified by hand against 79,917 NSE and 26,536 BSE entries.
-  Delete the file and the app falls back to the market-cap and turnover rules.
+  Delete the file and the app falls back to the market-cap and turnover rules. A
+  brand-new install is given a built-in copy of the author's list (see *Download
+  and install*), so nobody needs a screener account to start.
 - **Data** — daily OHLCV in SQLite, from two sources on purpose: **Upstox** for
   building history, and the exchanges' own **NSE + BSE bhavcopy** for the recent
   tail. See below for why.
