@@ -776,7 +776,7 @@ export default function App() {
 
           {setupUnfinished && (
             <div className="setup-banner">
-              <span>Setup did not finish, so some stocks have no history yet.</span>
+              <span>Download did not finish, so some stocks have no history yet.</span>
               <button className="primary" onClick={job("full")}>
                 Continue download
               </button>

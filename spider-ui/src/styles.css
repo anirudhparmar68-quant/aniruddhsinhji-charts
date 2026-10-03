@@ -782,7 +782,8 @@ select.win option { background: var(--raised); color: var(--text); }
 .empty.welcome .fine {
   font-size: 11px;
   opacity: 0.8;
-  word-break: break-all;
+  /* A long folder path may break anywhere, ordinary words only when they must. */
+  overflow-wrap: anywhere;
 }
 
 .setup-banner {

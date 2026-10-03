@@ -4,7 +4,7 @@ REM
 REM   Run.bat            the desktop app (Tauri + React) - builds if needed
 REM   Run.bat --old      the original egui app
 REM   Run.bat --tail     headless daily update from bhavcopy, no login needed
-REM   Run.bat --sync     headless full sync, needs an Upstox token
+REM   Run.bat --sync     headless full sync (no login needed; Upstox keys are optional)
 
 cd /d "%~dp0"
 
@@ -19,6 +19,10 @@ if exist "target\release\spider-ui.exe" (
 )
 
 echo Building the desktop app. The first build takes a few minutes...
+if not exist "spider-ui\node_modules" (
+  echo Installing the web part first...
+  call npm install --prefix spider-ui || goto fail
+)
 call npm run tauri build --prefix spider-ui || goto fail
 start "" "target\release\spider-ui.exe"
 goto end
