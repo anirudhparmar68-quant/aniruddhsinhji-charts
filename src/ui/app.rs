@@ -1314,12 +1314,24 @@ impl SpiderApp {
         });
 
         ui.add_space(12.0);
-        ui.collapsing("Cup & Handle Breakout — your Chartink scan", |ui| {
+        ui.collapsing("Inside Bar Breakout — your Chartink scan", |ui| {
             ui.label(
                 RichText::new(
-                    "A faithful port of the Chartink screener, and the only non-candlestick \
-                     pattern in the app. It is a momentum base-breakout checklist rather than a \
-                     shape test, which is exactly why it stayed when the geometric structures went.",
+                    "Yesterday was an inside bar (lower high and higher low than the day before), \
+                     and today closes above yesterday's high. It has no tunable thresholds.",
+                )
+                .small()
+                .weak(),
+            );
+        });
+
+        ui.add_space(12.0);
+        ui.collapsing("Cup n Handle — your Chartink scan", |ui| {
+            ui.label(
+                RichText::new(
+                    "A faithful port of the Chartink screener. It is a momentum base-breakout \
+                     checklist rather than a shape test, which is exactly why it stayed when the \
+                     geometric structures went.",
                 )
                 .small()
                 .weak(),

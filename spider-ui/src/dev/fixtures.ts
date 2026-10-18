@@ -194,7 +194,7 @@ export const chart = (key: string): ChartData | null => {
           {
             time: candles[candles.length - 1].time,
             startTime: candles[candles.length - 70].time,
-            pattern: "Cup & Handle Breakout (Chartink)",
+            pattern: "Cup n Handle",
             direction: "Bullish",
             score: s.score,
             detail: `closed above the 30-day high on ${s.volumeRatio.toFixed(1)}× volume, RSI ${s.rsi.toFixed(0)}`,
@@ -216,7 +216,7 @@ export const scanner = (): ScanHit[] =>
     name: s.name,
     exchange: s.exchange,
     date: LATEST,
-    pattern: "Cup & Handle Breakout (Chartink)",
+    pattern: "Cup n Handle",
     direction: "Bullish",
     score: s.score,
     detail: "closed above the 30-day high",

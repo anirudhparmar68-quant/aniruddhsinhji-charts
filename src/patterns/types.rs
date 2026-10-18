@@ -90,9 +90,10 @@ macro_rules! patterns {
 patterns! {
     // The whole catalogue. Candlestick recognisers (75 of them) and geometric
     // chart structures (24) were both built, tested, and then removed on
-    // request — the app now reports exactly one thing, and it is the one whose
-    // rules are not a matter of opinion. Both sets live in git history.
-    ChartinkCupBreakout => ("Cup & Handle Breakout (Chartink)", Chart, Bullish),
+    // request — the app now reports only Chartink-style scans, whose rules are
+    // not a matter of opinion. Both removed sets live in git history.
+    ChartinkCupBreakout => ("Cup n Handle", Chart, Bullish),
+    ChartinkInsideBarBreakout => ("Inside Bar Breakout", Chart, Bullish),
 }
 
 /// One recognised pattern occurrence.
@@ -162,10 +163,13 @@ mod tests {
     }
 
     #[test]
-    fn the_catalogue_is_exactly_the_chartink_scan() {
+    fn the_catalogue_is_exactly_the_chartink_scans() {
         // Candlesticks and geometric structures were both removed on request.
         // If either ever comes back, this is the line that will say so.
-        assert_eq!(PatternKind::ALL, &[PatternKind::ChartinkCupBreakout]);
+        assert_eq!(
+            PatternKind::ALL,
+            &[PatternKind::ChartinkCupBreakout, PatternKind::ChartinkInsideBarBreakout]
+        );
         assert!(PatternKind::ALL.iter().all(|k| k.family() == Chart));
     }
 }

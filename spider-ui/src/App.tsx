@@ -207,6 +207,8 @@ export default function App() {
     const i = remembered("window", 0);
     return Number.isInteger(i) && i >= 0 && i < WINDOWS.length ? i : 0;
   });
+  // "all" or the name of one pattern, as the scan results label it.
+  const [patternFilter, setPatternFilter] = useState("all");
   const [universe, setUniverse] = useState<Stock[]>([]);
   const [hits, setHits] = useState<ScanHit[]>([]);
   const [status, setStatus] = useState<Status | null>(null);
@@ -322,6 +324,14 @@ export default function App() {
   const effSort: SortKey = sortOffered ? sortKey : "symbol";
   const effDesc = sortOffered ? sortDesc : defaultDesc("symbol");
 
+  /** Every pattern that fired in the current window, for the pattern dropdown. */
+  const patternNames = useMemo(() => [...new Set(hits.map((h) => h.pattern))].sort(), [hits]);
+  /** The scanner hits after the pattern dropdown; "all" keeps every pattern. */
+  const scanHits = useMemo(
+    () => (patternFilter === "all" ? hits : hits.filter((h) => h.pattern === patternFilter)),
+    [hits, patternFilter],
+  );
+
   const rows: Row[] = useMemo(() => {
     let base: Row[];
     if (view === "all") {
@@ -340,7 +350,7 @@ export default function App() {
       // One line per stock: a stock that fired on three days in the window is
       // still one thing to look at, and its chart shows every marker anyway.
       const newest = new Map<string, ScanHit>();
-      for (const h of hits) {
+      for (const h of scanHits) {
         const seen = newest.get(h.key);
         if (!seen || h.date > seen.date) newest.set(h.key, h);
       }
@@ -383,13 +393,13 @@ export default function App() {
       return (effDesc ? -c : c) || a.symbol.localeCompare(b.symbol);
     });
     return base;
-  }, [view, universe, hits, query, effSort, effDesc]);
+  }, [view, universe, hits, scanHits, query, effSort, effDesc]);
 
   /** Stable, so a memoised row is not invalidated by a new closure each render. */
   const pick = useCallback((key: string) => setSelected(key), []);
 
   /** Distinct stocks in the current scanner window, before any search. */
-  const scanCount = useMemo(() => new Set(hits.map((h) => h.key)).size, [hits]);
+  const scanCount = useMemo(() => new Set(scanHits.map((h) => h.key)).size, [scanHits]);
 
   const index = useMemo(
     () => (selected ? rows.findIndex((r) => r.key === selected) : -1),
@@ -737,6 +747,21 @@ export default function App() {
                 {WINDOWS.map((w, i) => (
                   <option key={w.label} value={i}>
                     {w.label}
+                  </option>
+                ))}
+              </select>
+            )}
+            {view === "scan" && (
+              <select
+                className="win"
+                value={patternFilter}
+                onChange={(e) => setPatternFilter(e.target.value)}
+                title="Show one pattern, or all of them"
+              >
+                <option value="all">All patterns</option>
+                {patternNames.map((p) => (
+                  <option key={p} value={p}>
+                    {p}
                   </option>
                 ))}
               </select>

@@ -15,7 +15,8 @@ use tauri::Emitter;
 
 use spider_charts::config::Settings;
 use spider_charts::model::Candle;
-use spider_charts::patterns::types::Detection;
+use spider_charts::patterns::scans::{cup_geometry, CupBreakoutParams};
+use spider_charts::patterns::types::{Detection, PatternKind};
 use spider_charts::sync::{self, Command, Event, LatestSummary, SharedState};
 
 // ---------------------------------------------------------------------------
@@ -104,6 +105,26 @@ pub struct EventDto {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PointDto {
+    pub time: String,
+    pub price: f64,
+}
+
+/// The parts of a Cup n Handle breakout, placed on closes, for drawing.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CupDto {
+    pub left_rim: PointDto,
+    pub bottom: PointDto,
+    pub right_rim: PointDto,
+    pub handle_low: Option<PointDto>,
+    pub breakout: PointDto,
+    /// The 30-day closing high the breakout cleared.
+    pub neckline: f64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ChartDto {
     pub key: String,
     pub symbol: String,
@@ -112,6 +133,8 @@ pub struct ChartDto {
     pub candles: Vec<CandleDto>,
     pub markers: Vec<MarkerDto>,
     pub events: Vec<EventDto>,
+    /// Only when Cup n Handle fired on the newest session; never for an older one.
+    pub cup: Option<CupDto>,
 }
 
 #[derive(Serialize)]
@@ -314,7 +337,40 @@ fn universe_rows(snap: &sync::Shared) -> Vec<StockDto> {
 /// Everything the chart pane needs for one stock, in a single round trip.
 #[tauri::command]
 fn get_chart(key: String, state: tauri::State<'_, AppState>) -> Option<ChartDto> {
-    chart_for(&sync::snapshot(&state.shared), &key)
+    let snap = sync::snapshot(&state.shared);
+    let mut chart = chart_for(&snap, &key)?;
+    let params = state.settings.lock().map(|s| s.patterns.chartink.clone()).unwrap_or_default();
+    chart.cup = cup_for(&snap, &key, &params);
+    Some(chart)
+}
+
+/// The cup drawing for a stock, if Cup n Handle fired on its newest candle and
+/// that candle is the newest session in the data. An older breakout is left as
+/// a marker only.
+fn cup_for(snap: &sync::Shared, key: &str, params: &CupBreakoutParams) -> Option<CupDto> {
+    let candles = snap.candles.get(key)?;
+    let last = candles.len().checked_sub(1)?;
+    if snap.latest_session != Some(candles[last].date) {
+        return None;
+    }
+    let fired = snap
+        .detections
+        .get(key)?
+        .iter()
+        .any(|d| d.kind == PatternKind::ChartinkCupBreakout && d.end == last);
+    if !fired {
+        return None;
+    }
+    let g = cup_geometry(candles, last, params)?;
+    let point = |k: usize| PointDto { time: ymd(candles[k].date), price: finite(candles[k].close) };
+    Some(CupDto {
+        left_rim: point(g.left_rim),
+        bottom: point(g.bottom),
+        right_rim: point(g.right_rim),
+        handle_low: g.handle_low.map(point),
+        breakout: point(g.breakout),
+        neckline: finite(g.neckline),
+    })
 }
 
 fn chart_for(snap: &sync::Shared, key: &str) -> Option<ChartDto> {
@@ -377,6 +433,7 @@ fn chart_for(snap: &sync::Shared, key: &str) -> Option<ChartDto> {
                     .collect()
             })
             .unwrap_or_default(),
+        cup: None,
     })
 }
 

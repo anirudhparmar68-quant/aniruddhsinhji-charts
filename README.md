@@ -569,9 +569,9 @@ and parsing. One test talks to NSE for real and is skipped unless asked:
 
 ---
 
-## The one chart pattern that stayed
+## The chart patterns that stayed
 
-**`Cup & Handle Breakout (Chartink)`** — the seven conditions of a Chartink scan, ported
+**`Cup n Handle`** — the seven conditions of a Chartink scan, ported
 one for one (it has never been compared against Chartink's live output, which uses its
 own data and indicator smoothing):
 
@@ -597,6 +597,18 @@ One detail worth keeping: *crossed above* is implemented as "above today **and
 not** above yesterday", not merely "is above". A stock that broke out a week ago
 and has held the level is not a fresh breakout, and treating it as one would fill
 the list with names whose move already happened.
+
+**`Inside Bar Breakout`** — the three conditions of a second Chartink scan, on daily
+bars for the cash segment, all required:
+
+```text
+1 day ago High  <  2 days ago High      yesterday's high sits inside the day before's
+1 day ago Low   >  2 days ago Low       yesterday's low sits inside the day before's
+Close           >  1 day ago High       today closes above yesterday's high
+```
+
+It has no tunable thresholds. The score rises with how far today's close clears
+yesterday's high, with 3% or more as full marks.
 
 ---
 

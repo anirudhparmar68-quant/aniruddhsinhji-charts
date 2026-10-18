@@ -163,10 +163,148 @@ pub fn cup_breakout(candles: &[Candle], p: &CupBreakoutParams) -> Vec<Detection>
     out
 }
 
+/// Where the parts of a cup breakout sit, for drawing it on a chart.
+///
+/// The scan never tests shape, so these points are chosen afterwards, from
+/// closes only, inside the scan's own `base_window`:
+///
+/// - left rim, bottom and right rim: the trio that makes the deepest cup,
+///   measured from the lower rim down to the bottom, where the bottom is the
+///   lowest close between the rims;
+/// - handle: the lowest close between the right rim and the breakout, if any;
+/// - neckline: `Max(breakout_lookback, 1 day ago Close)`, the level the scan
+///   says was broken. It often equals the right rim, but not always.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CupGeometry {
+    pub left_rim: usize,
+    pub bottom: usize,
+    pub right_rim: usize,
+    pub handle_low: Option<usize>,
+    pub breakout: usize,
+    pub neckline: f64,
+}
+
+/// The cup drawn for a breakout on bar `i`, or `None` when the base holds no
+/// dip below both rims to draw.
+pub fn cup_geometry(candles: &[Candle], i: usize, p: &CupBreakoutParams) -> Option<CupGeometry> {
+    if i >= candles.len() || p.base_window < 3 || i + 1 < p.base_window || i < p.breakout_lookback {
+        return None;
+    }
+    let close = |k: usize| candles[k].close;
+    let start = i + 1 - p.base_window;
+
+    // For each right rim, walk the left rim back from it while keeping the
+    // lowest close in between, so every (left, bottom, right) trio is seen once.
+    let mut best: Option<(f64, usize, usize, usize)> = None;
+    for right in start + 2..i {
+        let mut bottom = right - 1;
+        for left in (start..right - 1).rev() {
+            if close(left + 1) < close(bottom) {
+                bottom = left + 1;
+            }
+            let depth = close(left).min(close(right)) - close(bottom);
+            // Depth is capped by the lower rim, so many left rims can tie. The
+            // highest of them is the real peak; any other sits on the way down.
+            let better = match best {
+                None => true,
+                Some((d, l, ..)) => depth > d || (depth == d && close(left) > close(l)),
+            };
+            if better {
+                best = Some((depth, left, bottom, right));
+            }
+        }
+    }
+    let (depth, left_rim, bottom, right_rim) = best?;
+    if depth <= 0.0 {
+        return None;
+    }
+
+    // Latest bar wins a tie, as Chartink's "1 day ago" window reads it.
+    let handle_low = (right_rim + 1..i).min_by(|&a, &b| close(a).total_cmp(&close(b)).then(b.cmp(&a)));
+    let neckline = ta::highest_close(candles, i - 1, p.breakout_lookback)?;
+
+    Some(CupGeometry { left_rim, bottom, right_rim, handle_low, breakout: i, neckline })
+}
+
+/// Every bar where yesterday was an inside bar and today closes above its high.
+///
+/// ```text
+/// Daily 1 day ago High  <  2 days ago High
+/// Daily 1 day ago Low   >  2 days ago Low
+/// Daily Close           >  1 day ago High
+/// ```
+pub fn inside_bar_breakout(candles: &[Candle]) -> Vec<Detection> {
+    let mut out = Vec::new();
+    for i in 2..candles.len() {
+        let (mother, inside, today) = (&candles[i - 2], &candles[i - 1], &candles[i]);
+        if inside.high >= mother.high || inside.low <= mother.low {
+            continue;
+        }
+        if today.close <= inside.high {
+            continue;
+        }
+
+        // Score by how far the close cleared the inside bar's high; 3% or more is full marks.
+        let margin = (today.close - inside.high) / inside.high;
+        let score = 0.70 + (margin / 0.03).clamp(0.0, 1.0) * 0.30;
+
+        out.push(
+            Detection::new(K::ChartinkInsideBarBreakout, i - 2, i, score)
+                .with_detail(format!("closed {:.1}% above the inside bar's high", margin * 100.0)),
+        );
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::NaiveDate;
+
+    fn bar(day: i64, high: f64, low: f64, close: f64) -> Candle {
+        Candle {
+            date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap() + chrono::Duration::days(day),
+            open: close,
+            high,
+            low,
+            close,
+            volume: 100_000,
+        }
+    }
+
+    #[test]
+    fn inside_bar_breakout_fires_on_the_close_above_the_inside_high() {
+        let candles = vec![
+            bar(0, 102.0, 98.0, 100.0), // mother bar
+            bar(1, 101.0, 99.0, 100.0), // inside bar
+            bar(2, 103.0, 100.5, 101.5), // closes above 101
+        ];
+        let hits = inside_bar_breakout(&candles);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].kind, K::ChartinkInsideBarBreakout);
+        assert_eq!((hits[0].start, hits[0].end), (0, 2));
+    }
+
+    #[test]
+    fn inside_bar_breakout_needs_the_close_above_the_inside_high() {
+        let candles = vec![
+            bar(0, 102.0, 98.0, 100.0),
+            bar(1, 101.0, 99.0, 100.0),
+            bar(2, 103.0, 100.5, 100.5), // closes below 101
+        ];
+        assert!(inside_bar_breakout(&candles).is_empty());
+    }
+
+    #[test]
+    fn inside_bar_breakout_needs_both_the_lower_high_and_the_higher_low() {
+        // Yesterday's low undercuts the mother bar's low, so it is not an inside bar.
+        let candles = vec![
+            bar(0, 102.0, 98.0, 100.0),
+            bar(1, 101.0, 97.5, 100.0),
+            bar(2, 103.0, 100.5, 101.5),
+        ];
+        assert!(inside_bar_breakout(&candles).is_empty());
+    }
 
     fn build(rows: &[(f64, i64)]) -> Vec<Candle> {
         rows.iter()
@@ -274,6 +412,39 @@ mod tests {
             hits.len(),
             "a standing high must not re-fire on every subsequent bar"
         );
+    }
+
+    #[test]
+    fn cup_geometry_finds_the_rims_bottom_and_neckline() {
+        let candles = breakout_series();
+        let i = candles.len() - 1;
+        let g = cup_geometry(&candles, i, &CupBreakoutParams::default()).expect("a cup to draw");
+        // Peak of the rally, low of the correction, top of the quiet base.
+        assert_eq!((g.left_rim, g.bottom, g.right_rim, g.breakout), (80, 89, 103, i));
+        // The base runs straight into the breakout, so there is no handle.
+        assert_eq!(g.handle_low, None);
+        // The level broken is the 30-day closing high, which here is the left rim.
+        assert_eq!(g.neckline, candles[80].close);
+    }
+
+    #[test]
+    fn cup_geometry_marks_the_handle_low() {
+        let mut rows: Vec<(f64, i64)> = breakout_series().iter().map(|c| (c.close, c.volume)).collect();
+        let breakout = rows.pop().unwrap();
+        rows.extend([(126.0, 80_000), (124.0, 80_000), (127.0, 80_000)]);
+        rows.push(breakout);
+        let candles = build(&rows);
+        let g = cup_geometry(&candles, candles.len() - 1, &CupBreakoutParams::default()).expect("a cup to draw");
+        assert_eq!(g.right_rim, 103);
+        assert_eq!(g.handle_low, Some(105), "the 124 close is the handle's low");
+    }
+
+    #[test]
+    fn cup_geometry_needs_a_dip() {
+        let rows: Vec<(f64, i64)> = (0..140).map(|i| (100.0 + i as f64 * 0.5, 100_000)).collect();
+        let candles = build(&rows);
+        assert_eq!(cup_geometry(&candles, 139, &CupBreakoutParams::default()), None);
+        assert_eq!(cup_geometry(&candles, 10, &CupBreakoutParams::default()), None, "too early for a base");
     }
 
     #[test]

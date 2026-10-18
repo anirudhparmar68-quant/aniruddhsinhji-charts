@@ -25,6 +25,7 @@ pub struct PatternParams {
 /// user wants one row per pattern occurrence, not one per window that saw it.
 pub fn detect_all(candles: &[Candle], params: &PatternParams) -> Vec<Detection> {
     let mut all = scans::cup_breakout(candles, &params.chartink);
+    all.extend(scans::inside_bar_breakout(candles));
 
     all.sort_by(|a, b| {
         (a.kind.key(), a.end)
@@ -87,13 +88,12 @@ mod tests {
     }
 
     #[test]
-    fn only_the_chartink_scan_is_produced() {
+    fn only_the_chartink_scans_are_produced() {
         use types::PatternKind;
         for d in detect_all(&candles(220), &PatternParams::default()) {
-            assert_eq!(
-                d.kind,
-                PatternKind::ChartinkCupBreakout,
-                "the catalogue is one scan; {:?} should not exist",
+            assert!(
+                matches!(d.kind, PatternKind::ChartinkCupBreakout | PatternKind::ChartinkInsideBarBreakout),
+                "the catalogue is two scans; {:?} should not exist",
                 d.kind
             );
         }

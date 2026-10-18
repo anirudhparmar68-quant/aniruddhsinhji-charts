@@ -5,12 +5,13 @@
  *  arrow-key walk through a list feel heavy, and walking the list quickly is
  *  the whole point of this pane. */
 
-import { useEffect, useLayoutEffect, useRef } from "react";
+import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   CandlestickSeries,
   ColorType,
   CrosshairMode,
   HistogramSeries,
+  LineSeries,
   LineStyle,
   createChart,
   createSeriesMarkers,
@@ -19,7 +20,7 @@ import {
   type ISeriesMarkersPluginApi,
   type Time,
 } from "lightweight-charts";
-import type { Bar, ChartData } from "./api";
+import type { Bar, ChartData, CupShape } from "./api";
 
 /** Bars visible when a stock is opened. Enough to see the base a cup formed
  *  over without the candles turning into hairlines. */
@@ -31,6 +32,29 @@ const RIGHT_OFFSET = 14;
 
 const UP = "#2ebd85";
 const DOWN = "#f6465d";
+
+/** A short tag and colour per pattern, so two setups on one chart are never
+ *  mistaken for each other. Keyed by the label the engine sends; a pattern not
+ *  listed here falls back to the plain up/down colour with no tag. */
+const PATTERN_STYLE: Record<string, { tag: string; color: string }> = {
+  "Cup n Handle": { tag: "C&H", color: UP },
+  "Inside Bar Breakout": { tag: "IB", color: "#4c9aff" },
+};
+
+/** Cup drawing colours: the bowl, the neckline it broke, and the handle. */
+const CUP = "#facc15";
+const NECK = "#c9d1d9";
+const HANDLE = "#22d3ee";
+
+/** The line series and label layers that draw one cup. */
+interface CupLayers {
+  bowl: ISeriesApi<"Line">;
+  neck: ISeriesApi<"Line">;
+  handle: ISeriesApi<"Line">;
+  bowlLabels: ISeriesMarkersPluginApi<Time>;
+  neckLabels: ISeriesMarkersPluginApi<Time>;
+  handleLabels: ISeriesMarkersPluginApi<Time>;
+}
 
 function fmt(n: number, dp = 2): string {
   return n.toLocaleString("en-IN", { minimumFractionDigits: dp, maximumFractionDigits: dp });
@@ -50,6 +74,7 @@ export default function ChartPane({ data }: { data: ChartData | null }) {
   const priceRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const volRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
+  const cupRef = useRef<CupLayers | null>(null);
   // Kept outside React state: the crosshair handler reads it on every mouse
   // move, and a re-render per pixel is exactly the jank this pane avoids.
   const barsRef = useRef<Bar[]>([]);
@@ -59,6 +84,9 @@ export default function ChartPane({ data }: { data: ChartData | null }) {
   /// Bar the crosshair is currently over, so a data refresh repaints the bar
   /// being pointed at rather than snapping the readout to the newest one.
   const hovered = useRef<number | null>(null);
+  /// Candle the user clicked, tagged with the stock it belongs to so switching
+  /// stocks drops it without an extra effect. Null shows the newest signal.
+  const [clicked, setClicked] = useState<{ key: string; time: string } | null>(null);
 
   // -- create once ---------------------------------------------------------
   useLayoutEffect(() => {
@@ -158,6 +186,22 @@ export default function ChartPane({ data }: { data: ChartData | null }) {
     const panes = chart.panes();
     if (panes.length > 1) panes[1].setHeight(110);
 
+    // The cup drawing rides on three plain line series in the price pane. They
+    // carry no price line, axis label or crosshair dot, so they read as a
+    // drawing rather than as data.
+    const overlay = { priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false };
+    const bowl = chart.addSeries(LineSeries, { ...overlay, color: CUP, lineWidth: 2 });
+    const neck = chart.addSeries(LineSeries, { ...overlay, color: NECK, lineWidth: 1, lineStyle: LineStyle.Dashed });
+    const handle = chart.addSeries(LineSeries, { ...overlay, color: HANDLE, lineWidth: 2 });
+    cupRef.current = {
+      bowl,
+      neck,
+      handle,
+      bowlLabels: createSeriesMarkers(bowl, []),
+      neckLabels: createSeriesMarkers(neck, []),
+      handleLabels: createSeriesMarkers(handle, []),
+    };
+
     chart.subscribeCrosshairMove((param) => {
       const bars = barsRef.current;
       if (!bars.length) return;
@@ -171,6 +215,16 @@ export default function ChartPane({ data }: { data: ChartData | null }) {
       const bar = i >= 0 && i < bars.length ? i : bars.length - 1;
       hovered.current = typeof param.logical === "number" ? bar : null;
       paintLegend(legendRef.current, bar, bars);
+    });
+
+    // Clicking a candle pins the signal card to that candle. Clicking the empty
+    // gap past the newest candle un-pins it, back to the newest signal.
+    chart.subscribeClick((param) => {
+      const bars = barsRef.current;
+      const key = framedKey.current;
+      if (!bars.length || key === null || typeof param.logical !== "number") return;
+      const i = Math.round(param.logical);
+      setClicked(i >= 0 && i < bars.length ? { key, time: bars[i].time } : null);
     });
 
     // Follows the window and the splitter. `contentRect` is used rather than
@@ -193,6 +247,7 @@ export default function ChartPane({ data }: { data: ChartData | null }) {
       priceRef.current = null;
       volRef.current = null;
       markersRef.current = null;
+      cupRef.current = null;
     };
   }, []);
 
@@ -227,14 +282,17 @@ export default function ChartPane({ data }: { data: ChartData | null }) {
 
     // Scan signals point at the candle, corporate events sit above it. Both go in
     // one list, which the chart wants in ascending time order.
-    const signalMarkers = (data?.markers ?? []).map((m) => ({
-      time: m.time as unknown as Time,
-      position: m.direction === "Bearish" ? ("aboveBar" as const) : ("belowBar" as const),
-      color: m.direction === "Bearish" ? DOWN : UP,
-      shape: m.direction === "Bearish" ? ("arrowDown" as const) : ("arrowUp" as const),
-      text: `${(m.score * 100).toFixed(0)}%`,
-      size: 1,
-    }));
+    const signalMarkers = (data?.markers ?? []).map((m) => {
+      const style = PATTERN_STYLE[m.pattern];
+      return {
+        time: m.time as unknown as Time,
+        position: m.direction === "Bearish" ? ("aboveBar" as const) : ("belowBar" as const),
+        color: style?.color ?? (m.direction === "Bearish" ? DOWN : UP),
+        shape: m.direction === "Bearish" ? ("arrowDown" as const) : ("arrowUp" as const),
+        text: `${style ? `${style.tag} ` : ""}${(m.score * 100).toFixed(0)}%`,
+        size: 1,
+      };
+    });
     const eventMarkers = (data?.events ?? []).map((e) => ({
       time: e.time as unknown as Time,
       position: "aboveBar" as const,
@@ -248,6 +306,7 @@ export default function ChartPane({ data }: { data: ChartData | null }) {
     markersRef.current?.setMarkers(
       [...signalMarkers, ...eventMarkers].sort((a, b) => String(a.time).localeCompare(String(b.time))),
     );
+    if (cupRef.current) drawCup(cupRef.current, data?.cup ?? null, bars);
 
     if (bars.length) {
       // Frame the viewport only when the stock itself changed. The same stock
@@ -292,6 +351,7 @@ export default function ChartPane({ data }: { data: ChartData | null }) {
   };
 
   const reset = () => {
+    setClicked(null);
     const ts = chartRef.current?.timeScale();
     const n = barsRef.current.length;
     if (!ts || !n) return;
@@ -302,11 +362,16 @@ export default function ChartPane({ data }: { data: ChartData | null }) {
   const prev = data?.candles.at(-2);
   const chg = last && prev && prev.close > 0 ? ((last.close - prev.close) / prev.close) * 100 : 0;
   const dir = chg > 0 ? "up" : chg < 0 ? "down" : "flat";
-  // The newest signal is shown whether or not it landed on the newest candle —
-  // a stock opened from the "1 month" window would otherwise show no card at
-  // all, which reads as "nothing fired here". The date says which bar it was.
-  const signal = data?.markers.at(-1);
-  const signalIsOld = !!signal && !!last && signal.time !== last.time;
+  // With no candle clicked, the newest signal is shown whether or not it landed
+  // on the newest candle — a stock opened from the "1 month" window would
+  // otherwise show no card at all, which reads as "nothing fired here". A
+  // clicked candle shows its own signals instead, or says it has none.
+  const pinned = clicked && data && clicked.key === data.key ? clicked.time : null;
+  const newest = data?.markers.at(-1);
+  const signals = pinned ? (data?.markers ?? []).filter((m) => m.time === pinned) : newest ? [newest] : [];
+  const cardTime = pinned ?? newest?.time;
+  const cardIsOld = !!cardTime && !!last && cardTime !== last.time;
+  const cardColor = signals.length ? PATTERN_STYLE[signals[0].pattern]?.color : undefined;
 
   return (
     <section className="chart-pane">
@@ -340,15 +405,24 @@ export default function ChartPane({ data }: { data: ChartData | null }) {
         <div className="chart-host" ref={hostRef} />
         <div className="legend" ref={legendRef} />
 
-        {signal && (
-          <div className={`signal ${signalIsOld ? "old" : ""}`}>
-            <span className="t">
-              {signal.pattern} · {(signal.score * 100).toFixed(0)}%
-            </span>
-            <span className="d">
-              {signalIsOld && <b>{signal.time} · </b>}
-              {signal.detail}
-            </span>
+        {(signals.length > 0 || pinned) && (
+          <div className={`signal ${cardIsOld ? "old" : ""}`} style={{ borderLeftColor: cardColor }}>
+            {signals.map((s) => (
+              <Fragment key={`${s.time}-${s.pattern}`}>
+                <span className="t" style={{ color: PATTERN_STYLE[s.pattern]?.color }}>
+                  {s.pattern} · {(s.score * 100).toFixed(0)}%
+                </span>
+                <span className="d">
+                  {cardIsOld && <b>{s.time} · </b>}
+                  {s.detail}
+                </span>
+              </Fragment>
+            ))}
+            {signals.length === 0 && (
+              <span className="d">
+                <b>{pinned} · </b>no pattern on this candle
+              </span>
+            )}
           </div>
         )}
 
@@ -362,6 +436,67 @@ export default function ChartPane({ data }: { data: ChartData | null }) {
       </div>
     </section>
   );
+}
+
+/** Draw a Cup n Handle breakout, or clear the drawing when there is none.
+ *
+ *  The bowl is two half-cosine curves meeting flat at the bottom, so it passes
+ *  exactly through the left rim, bottom and right rim closes the engine chose.
+ *  The neckline and handle are straight lines between real closes. */
+function drawCup(layers: CupLayers, cup: CupShape | null, bars: Bar[]) {
+  const clear = () => {
+    for (const s of [layers.bowl, layers.neck, layers.handle]) s.setData([]);
+    for (const m of [layers.bowlLabels, layers.neckLabels, layers.handleLabels]) m.setMarkers([]);
+  };
+  if (!cup) return clear();
+
+  const at = new Map(bars.map((b, k) => [b.time, k]));
+  const l = at.get(cup.leftRim.time);
+  const m = at.get(cup.bottom.time);
+  const r = at.get(cup.rightRim.time);
+  const e = at.get(cup.breakout.time);
+  if (l === undefined || m === undefined || r === undefined || e === undefined) return clear();
+
+  const t = (k: number) => bars[k].time as unknown as Time;
+  // Eases from `from` to `to` with a flat slope at both ends.
+  const ease = (from: number, to: number, x: number) => to + (from - to) * ((1 + Math.cos(Math.PI * x)) / 2);
+  const bowl: { time: Time; value: number }[] = [];
+  for (let k = l; k <= r; k++) {
+    const value =
+      k <= m
+        ? ease(cup.leftRim.price, cup.bottom.price, (k - l) / Math.max(m - l, 1))
+        : ease(cup.bottom.price, cup.rightRim.price, (k - m) / Math.max(r - m, 1));
+    bowl.push({ time: t(k), value });
+  }
+  layers.bowl.setData(bowl);
+
+  const neck: { time: Time; value: number }[] = [];
+  for (let k = l; k <= e; k++) neck.push({ time: t(k), value: cup.neckline });
+  layers.neck.setData(neck);
+
+  const handle = [cup.rightRim, ...(cup.handleLow ? [cup.handleLow] : []), cup.breakout];
+  layers.handle.setData(handle.map((p) => ({ time: p.time as unknown as Time, value: p.price })));
+
+  const label = (time: string, position: "aboveBar" | "belowBar", color: string, text: string) => ({
+    time: time as unknown as Time,
+    position,
+    color,
+    shape: "circle" as const,
+    text,
+    size: 0.5,
+  });
+  layers.bowlLabels.setMarkers([
+    label(cup.leftRim.time, "aboveBar", CUP, `Left rim ${fmt(cup.leftRim.price)}`),
+    label(cup.bottom.time, "belowBar", CUP, `Cup bottom ${fmt(cup.bottom.price)}`),
+    label(cup.rightRim.time, "aboveBar", CUP, `Right rim ${fmt(cup.rightRim.price)}`),
+  ]);
+  layers.neckLabels.setMarkers([
+    label(bars[Math.round((l + r) / 2)].time, "aboveBar", NECK, `Neckline ${fmt(cup.neckline)} (30-day closing high)`),
+  ]);
+  layers.handleLabels.setMarkers([
+    ...(cup.handleLow ? [label(cup.handleLow.time, "belowBar", HANDLE, `Handle ${fmt(cup.handleLow.price)}`)] : []),
+    { ...label(cup.breakout.time, "aboveBar", UP, "Breakout"), shape: "arrowUp" as const, size: 1 },
+  ]);
 }
 
 /** Written straight to the DOM — this runs on every crosshair pixel. */

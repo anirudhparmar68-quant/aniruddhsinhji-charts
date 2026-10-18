@@ -66,6 +66,23 @@ export interface CorpEvent {
   adjusted: boolean;
 }
 
+export interface CupPoint {
+  time: string;
+  price: number;
+}
+
+/** The parts of a Cup n Handle breakout, on closes. Sent only when it fired on
+ *  the newest session. */
+export interface CupShape {
+  leftRim: CupPoint;
+  bottom: CupPoint;
+  rightRim: CupPoint;
+  handleLow: CupPoint | null;
+  breakout: CupPoint;
+  /** The 30-day closing high the breakout cleared. */
+  neckline: number;
+}
+
 export interface ChartData {
   key: string;
   symbol: string;
@@ -74,6 +91,7 @@ export interface ChartData {
   candles: Bar[];
   markers: Marker[];
   events: CorpEvent[];
+  cup?: CupShape | null;
 }
 
 export interface ScanHit {
