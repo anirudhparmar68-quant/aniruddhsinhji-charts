@@ -125,6 +125,24 @@ pub struct CupDto {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct BarDto {
+    pub time: String,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+}
+
+/// The three bars of an Inside Bar Breakout, for drawing.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InsideBarDto {
+    pub mother: BarDto,
+    pub inside: BarDto,
+    pub breakout: BarDto,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ChartDto {
     pub key: String,
     pub symbol: String,
@@ -135,6 +153,8 @@ pub struct ChartDto {
     pub events: Vec<EventDto>,
     /// Only when Cup n Handle fired on the newest session; never for an older one.
     pub cup: Option<CupDto>,
+    /// Only when Inside Bar Breakout fired on the newest session.
+    pub inside_bar: Option<InsideBarDto>,
 }
 
 #[derive(Serialize)]
@@ -341,26 +361,38 @@ fn get_chart(key: String, state: tauri::State<'_, AppState>) -> Option<ChartDto>
     let mut chart = chart_for(&snap, &key)?;
     let params = state.settings.lock().map(|s| s.patterns.chartink.clone()).unwrap_or_default();
     chart.cup = cup_for(&snap, &key, &params);
+    chart.inside_bar = inside_bar_for(&snap, &key);
     Some(chart)
 }
 
-/// The cup drawing for a stock, if Cup n Handle fired on its newest candle and
-/// that candle is the newest session in the data. An older breakout is left as
-/// a marker only.
-fn cup_for(snap: &sync::Shared, key: &str, params: &CupBreakoutParams) -> Option<CupDto> {
+/// The stock's candles and newest bar, if `kind` fired on that bar and it is
+/// the newest session in the data. Drawings are for today's setups only; an
+/// older one is left as a marker.
+fn fired_today<'a>(snap: &'a sync::Shared, key: &str, kind: PatternKind) -> Option<(&'a [Candle], usize)> {
     let candles = snap.candles.get(key)?;
     let last = candles.len().checked_sub(1)?;
     if snap.latest_session != Some(candles[last].date) {
         return None;
     }
-    let fired = snap
-        .detections
-        .get(key)?
-        .iter()
-        .any(|d| d.kind == PatternKind::ChartinkCupBreakout && d.end == last);
-    if !fired {
-        return None;
-    }
+    let fired = snap.detections.get(key)?.iter().any(|d| d.kind == kind && d.end == last);
+    fired.then_some((candles.as_slice(), last))
+}
+
+/// The three bars behind today's Inside Bar Breakout.
+fn inside_bar_for(snap: &sync::Shared, key: &str) -> Option<InsideBarDto> {
+    let (candles, last) = fired_today(snap, key, PatternKind::ChartinkInsideBarBreakout)?;
+    let bar = |k: usize| BarDto {
+        time: ymd(candles[k].date),
+        high: finite(candles[k].high),
+        low: finite(candles[k].low),
+        close: finite(candles[k].close),
+    };
+    Some(InsideBarDto { mother: bar(last.checked_sub(2)?), inside: bar(last - 1), breakout: bar(last) })
+}
+
+/// The cup drawing for today's Cup n Handle breakout.
+fn cup_for(snap: &sync::Shared, key: &str, params: &CupBreakoutParams) -> Option<CupDto> {
+    let (candles, last) = fired_today(snap, key, PatternKind::ChartinkCupBreakout)?;
     let g = cup_geometry(candles, last, params)?;
     let point = |k: usize| PointDto { time: ymd(candles[k].date), price: finite(candles[k].close) };
     Some(CupDto {
@@ -434,6 +466,7 @@ fn chart_for(snap: &sync::Shared, key: &str) -> Option<ChartDto> {
             })
             .unwrap_or_default(),
         cup: None,
+        inside_bar: None,
     })
 }
 

@@ -20,7 +20,7 @@ import {
   type ISeriesMarkersPluginApi,
   type Time,
 } from "lightweight-charts";
-import type { Bar, ChartData, CupShape } from "./api";
+import type { Bar, ChartData, CupShape, InsideBarShape } from "./api";
 
 /** Bars visible when a stock is opened. Enough to see the base a cup formed
  *  over without the candles turning into hairlines. */
@@ -36,10 +36,24 @@ const DOWN = "#f6465d";
 /** A short tag and colour per pattern, so two setups on one chart are never
  *  mistaken for each other. Keyed by the label the engine sends; a pattern not
  *  listed here falls back to the plain up/down colour with no tag. */
+const IB = "#4c9aff";
 const PATTERN_STYLE: Record<string, { tag: string; color: string }> = {
   "Cup n Handle": { tag: "C&H", color: UP },
-  "Inside Bar Breakout": { tag: "IB", color: "#4c9aff" },
+  "Inside Bar Breakout": { tag: "IB", color: IB },
 };
+
+/** Inside bar drawing colour for the mother bar's range; the inside bar's own
+ *  lines use the IB colour. */
+const MOTHER = "#f59e0b";
+
+/** The line series and label layers that draw one inside bar breakout. */
+interface InsideBarLayers {
+  motherHigh: ISeriesApi<"Line">;
+  motherLow: ISeriesApi<"Line">;
+  insideHigh: ISeriesApi<"Line">;
+  insideLow: ISeriesApi<"Line">;
+  labels: ISeriesMarkersPluginApi<Time>[];
+}
 
 /** Cup drawing colours: the bowl, the neckline it broke, and the handle. */
 const CUP = "#facc15";
@@ -75,6 +89,7 @@ export default function ChartPane({ data }: { data: ChartData | null }) {
   const volRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
   const cupRef = useRef<CupLayers | null>(null);
+  const ibRef = useRef<InsideBarLayers | null>(null);
   // Kept outside React state: the crosshair handler reads it on every mouse
   // move, and a re-render per pixel is exactly the jank this pane avoids.
   const barsRef = useRef<Bar[]>([]);
@@ -202,6 +217,18 @@ export default function ChartPane({ data }: { data: ChartData | null }) {
       handleLabels: createSeriesMarkers(handle, []),
     };
 
+    const motherHigh = chart.addSeries(LineSeries, { ...overlay, color: MOTHER, lineWidth: 2 });
+    const motherLow = chart.addSeries(LineSeries, { ...overlay, color: MOTHER, lineWidth: 2 });
+    const insideHigh = chart.addSeries(LineSeries, { ...overlay, color: IB, lineWidth: 2, lineStyle: LineStyle.Dashed });
+    const insideLow = chart.addSeries(LineSeries, { ...overlay, color: IB, lineWidth: 1, lineStyle: LineStyle.Dotted });
+    ibRef.current = {
+      motherHigh,
+      motherLow,
+      insideHigh,
+      insideLow,
+      labels: [motherHigh, motherLow, insideHigh, insideLow].map((s) => createSeriesMarkers(s, [])),
+    };
+
     chart.subscribeCrosshairMove((param) => {
       const bars = barsRef.current;
       if (!bars.length) return;
@@ -248,6 +275,7 @@ export default function ChartPane({ data }: { data: ChartData | null }) {
       volRef.current = null;
       markersRef.current = null;
       cupRef.current = null;
+      ibRef.current = null;
     };
   }, []);
 
@@ -303,10 +331,32 @@ export default function ChartPane({ data }: { data: ChartData | null }) {
       text: e.adjusted ? e.label : `${e.label} (not adjusted)`,
       size: 1,
     }));
+    // Today's drawings share one breakout label, set on the candles so it sits
+    // above the candle rather than across it. Both setups can fire on the same
+    // bar, and two labels there would print on top of each other.
+    const ib = data?.insideBar ?? null;
+    const breakoutTime = ib?.breakout.time ?? data?.cup?.breakout.time;
+    const breakoutMarkers = breakoutTime
+      ? [
+          {
+            time: breakoutTime as unknown as Time,
+            position: "aboveBar" as const,
+            color: UP,
+            shape: "arrowUp" as const,
+            text: ib
+              ? `Breakout +${(((ib.breakout.close - ib.inside.high) / ib.inside.high) * 100).toFixed(1)}%`
+              : "Breakout",
+            size: 1,
+          },
+        ]
+      : [];
     markersRef.current?.setMarkers(
-      [...signalMarkers, ...eventMarkers].sort((a, b) => String(a.time).localeCompare(String(b.time))),
+      [...signalMarkers, ...eventMarkers, ...breakoutMarkers].sort((a, b) =>
+        String(a.time).localeCompare(String(b.time)),
+      ),
     );
     if (cupRef.current) drawCup(cupRef.current, data?.cup ?? null, bars);
+    if (ibRef.current) drawInsideBar(ibRef.current, data?.insideBar ?? null);
 
     if (bars.length) {
       // Frame the viewport only when the stock itself changed. The same stock
@@ -493,10 +543,48 @@ function drawCup(layers: CupLayers, cup: CupShape | null, bars: Bar[]) {
   layers.neckLabels.setMarkers([
     label(bars[Math.round((l + r) / 2)].time, "aboveBar", NECK, `Neckline ${fmt(cup.neckline)} (30-day closing high)`),
   ]);
-  layers.handleLabels.setMarkers([
-    ...(cup.handleLow ? [label(cup.handleLow.time, "belowBar", HANDLE, `Handle ${fmt(cup.handleLow.price)}`)] : []),
-    { ...label(cup.breakout.time, "aboveBar", UP, "Breakout"), shape: "arrowUp" as const, size: 1 },
-  ]);
+  layers.handleLabels.setMarkers(
+    cup.handleLow ? [label(cup.handleLow.time, "belowBar", HANDLE, `Handle ${fmt(cup.handleLow.price)}`)] : [],
+  );
+}
+
+/** Draw today's Inside Bar Breakout, or clear the drawing when there is none.
+ *
+ *  The mother bar's high and low run from the mother bar to today, so the range
+ *  the inside bar sat in stays visible. The inside bar's high is the breakout
+ *  level and its low the other side of the squeeze. Lines stop at today's
+ *  candle: nothing is projected forward. The breakout arrow is set with the
+ *  candle markers. */
+function drawInsideBar(layers: InsideBarLayers, ib: InsideBarShape | null) {
+  const lines = [layers.motherHigh, layers.motherLow, layers.insideHigh, layers.insideLow];
+  if (!ib) {
+    for (const s of lines) s.setData([]);
+    for (const m of layers.labels) m.setMarkers([]);
+    return;
+  }
+  const t = (time: string) => time as unknown as Time;
+  const flat = (times: string[], value: number) => times.map((time) => ({ time: t(time), value }));
+  const all = [ib.mother.time, ib.inside.time, ib.breakout.time];
+  const fromInside = [ib.inside.time, ib.breakout.time];
+  layers.motherHigh.setData(flat(all, ib.mother.high));
+  layers.motherLow.setData(flat(all, ib.mother.low));
+  layers.insideHigh.setData(flat(fromInside, ib.inside.high));
+  layers.insideLow.setData(flat(fromInside, ib.inside.low));
+
+  const label = (time: string, position: "aboveBar" | "belowBar", color: string, text: string) => ({
+    time: t(time),
+    position,
+    color,
+    shape: "circle" as const,
+    text,
+    size: 0.5,
+  });
+  const [motherHigh, motherLow, insideHigh, insideLow] = layers.labels;
+  motherHigh.setMarkers([label(ib.mother.time, "aboveBar", MOTHER, `Mother H ${fmt(ib.mother.high)}`)]);
+  motherLow.setMarkers([label(ib.mother.time, "belowBar", MOTHER, `Mother L ${fmt(ib.mother.low)}`)]);
+  // The breakout arrow itself is drawn on the candles, with the cup's.
+  insideHigh.setMarkers([label(ib.breakout.time, "belowBar", IB, `Breakout level ${fmt(ib.inside.high)}`)]);
+  insideLow.setMarkers([label(ib.inside.time, "belowBar", IB, `Inside L ${fmt(ib.inside.low)}`)]);
 }
 
 /** Written straight to the DOM — this runs on every crosshair pixel. */

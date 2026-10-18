@@ -83,6 +83,21 @@ export interface CupShape {
   neckline: number;
 }
 
+export interface BarPoint {
+  time: string;
+  high: number;
+  low: number;
+  close: number;
+}
+
+/** The three bars of an Inside Bar Breakout. Sent only when it fired on the
+ *  newest session. */
+export interface InsideBarShape {
+  mother: BarPoint;
+  inside: BarPoint;
+  breakout: BarPoint;
+}
+
 export interface ChartData {
   key: string;
   symbol: string;
@@ -92,6 +107,7 @@ export interface ChartData {
   markers: Marker[];
   events: CorpEvent[];
   cup?: CupShape | null;
+  insideBar?: InsideBarShape | null;
 }
 
 export interface ScanHit {
