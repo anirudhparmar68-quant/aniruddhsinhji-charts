@@ -9,6 +9,14 @@ Guidance for Claude Code when working in this repository.
 - Code, identifiers, comments in code, commit messages, and file names stay in English.
 - If the owner writes in pure English, reply in English.
 
+## About the owner
+
+- Practicing Chartered Accountant (CA) in India.
+- Has passed all three levels of the CFA (Chartered Financial Analyst) program.
+- Works in trading, arbitrage, and hedging.
+
+Pitch explanations at this level. Use correct finance and accounting terms without over-explaining them. Explain code and Rust concepts plainly, since the owner is not a full-time software developer. Do not give personalised investment advice, and keep the app's "look, not advice" stance in any UI text or docs.
+
 ## What this project is
 
 Spider Charts: a Windows app that shows end-of-day NSE and BSE charts and lists stocks that match scan rules. It has two front-ends that share one Rust crate:
