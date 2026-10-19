@@ -475,6 +475,11 @@ select.win option { background: var(--raised); color: var(--text); }
   font-family: var(--mono);
   font-size: 12px;
 }
+.chart-actions button.on {
+  color: var(--text);
+  background: var(--raised);
+  border-color: var(--accent);
+}
 
 .chart-body { position: relative; min-height: 0; }
 .chart-host { position: absolute; inset: 0; }

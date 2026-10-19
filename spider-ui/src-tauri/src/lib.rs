@@ -127,6 +127,7 @@ pub struct CupDto {
 #[serde(rename_all = "camelCase")]
 pub struct BarDto {
     pub time: String,
+    pub open: f64,
     pub high: f64,
     pub low: f64,
     pub close: f64,
@@ -139,6 +140,13 @@ pub struct InsideBarDto {
     pub mother: BarDto,
     pub inside: BarDto,
     pub breakout: BarDto,
+}
+
+/// The three bars of a Three White Soldiers setup, oldest first, for drawing.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoldiersDto {
+    pub bars: Vec<BarDto>,
 }
 
 #[derive(Serialize)]
@@ -155,6 +163,8 @@ pub struct ChartDto {
     pub cup: Option<CupDto>,
     /// Only when Inside Bar Breakout fired on the newest session.
     pub inside_bar: Option<InsideBarDto>,
+    /// Only when Three White Soldiers fired on the newest session.
+    pub soldiers: Option<SoldiersDto>,
 }
 
 #[derive(Serialize)]
@@ -362,7 +372,25 @@ fn get_chart(key: String, state: tauri::State<'_, AppState>) -> Option<ChartDto>
     let params = state.settings.lock().map(|s| s.patterns.chartink.clone()).unwrap_or_default();
     chart.cup = cup_for(&snap, &key, &params);
     chart.inside_bar = inside_bar_for(&snap, &key);
+    chart.soldiers = soldiers_for(&snap, &key);
     Some(chart)
+}
+
+fn bar_dto(candles: &[Candle], k: usize) -> BarDto {
+    BarDto {
+        time: ymd(candles[k].date),
+        open: finite(candles[k].open),
+        high: finite(candles[k].high),
+        low: finite(candles[k].low),
+        close: finite(candles[k].close),
+    }
+}
+
+/// The three bars behind today's Three White Soldiers.
+fn soldiers_for(snap: &sync::Shared, key: &str) -> Option<SoldiersDto> {
+    let (candles, last) = fired_today(snap, key, PatternKind::ChartinkThreeWhiteSoldiers)?;
+    let first = last.checked_sub(2)?;
+    Some(SoldiersDto { bars: (first..=last).map(|k| bar_dto(candles, k)).collect() })
 }
 
 /// The stock's candles and newest bar, if `kind` fired on that bar and it is
@@ -381,12 +409,7 @@ fn fired_today<'a>(snap: &'a sync::Shared, key: &str, kind: PatternKind) -> Opti
 /// The three bars behind today's Inside Bar Breakout.
 fn inside_bar_for(snap: &sync::Shared, key: &str) -> Option<InsideBarDto> {
     let (candles, last) = fired_today(snap, key, PatternKind::ChartinkInsideBarBreakout)?;
-    let bar = |k: usize| BarDto {
-        time: ymd(candles[k].date),
-        high: finite(candles[k].high),
-        low: finite(candles[k].low),
-        close: finite(candles[k].close),
-    };
+    let bar = |k: usize| bar_dto(candles, k);
     Some(InsideBarDto { mother: bar(last.checked_sub(2)?), inside: bar(last - 1), breakout: bar(last) })
 }
 
@@ -467,6 +490,7 @@ fn chart_for(snap: &sync::Shared, key: &str) -> Option<ChartDto> {
             .unwrap_or_default(),
         cup: None,
         inside_bar: None,
+        soldiers: None,
     })
 }
 

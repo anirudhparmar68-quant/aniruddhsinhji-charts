@@ -85,6 +85,7 @@ export interface CupShape {
 
 export interface BarPoint {
   time: string;
+  open: number;
   high: number;
   low: number;
   close: number;
@@ -108,6 +109,9 @@ export interface ChartData {
   events: CorpEvent[];
   cup?: CupShape | null;
   insideBar?: InsideBarShape | null;
+  /** The three Three White Soldiers bars, oldest first. Sent only when it fired
+   *  on the newest session. */
+  soldiers?: { bars: BarPoint[] } | null;
 }
 
 export interface ScanHit {

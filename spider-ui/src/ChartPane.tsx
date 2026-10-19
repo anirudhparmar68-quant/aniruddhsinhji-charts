@@ -20,7 +20,7 @@ import {
   type ISeriesMarkersPluginApi,
   type Time,
 } from "lightweight-charts";
-import type { Bar, ChartData, CupShape, InsideBarShape } from "./api";
+import type { Bar, BarPoint, ChartData, CupShape, InsideBarShape } from "./api";
 
 /** Bars visible when a stock is opened. Enough to see the base a cup formed
  *  over without the candles turning into hairlines. */
@@ -37,10 +37,20 @@ const DOWN = "#f6465d";
  *  mistaken for each other. Keyed by the label the engine sends; a pattern not
  *  listed here falls back to the plain up/down colour with no tag. */
 const IB = "#4c9aff";
+const SOLDIERS = "#a78bfa";
 const PATTERN_STYLE: Record<string, { tag: string; color: string }> = {
   "Cup n Handle": { tag: "C&H", color: UP },
   "Inside Bar Breakout": { tag: "IB", color: IB },
+  "Three White Soldiers": { tag: "3WS", color: SOLDIERS },
 };
+
+/** The line series and label layers that draw one Three White Soldiers setup. */
+interface SoldiersLayers {
+  steps: ISeriesApi<"Line">;
+  start: ISeriesApi<"Line">;
+  stepLabels: ISeriesMarkersPluginApi<Time>;
+  startLabels: ISeriesMarkersPluginApi<Time>;
+}
 
 /** Inside bar drawing colour for the mother bar's range; the inside bar's own
  *  lines use the IB colour. */
@@ -90,6 +100,7 @@ export default function ChartPane({ data }: { data: ChartData | null }) {
   const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
   const cupRef = useRef<CupLayers | null>(null);
   const ibRef = useRef<InsideBarLayers | null>(null);
+  const soldiersRef = useRef<SoldiersLayers | null>(null);
   // Kept outside React state: the crosshair handler reads it on every mouse
   // move, and a re-render per pixel is exactly the jank this pane avoids.
   const barsRef = useRef<Bar[]>([]);
@@ -102,6 +113,22 @@ export default function ChartPane({ data }: { data: ChartData | null }) {
   /// Candle the user clicked, tagged with the stock it belongs to so switching
   /// stocks drops it without an extra effect. Null shows the newest signal.
   const [clicked, setClicked] = useState<{ key: string; time: string } | null>(null);
+  /// Pattern drawings are opt-in. Off, the chart is the plain candles and
+  /// markers it always was. The choice is remembered on this computer.
+  const [drawings, setDrawings] = useState(() => {
+    try {
+      return localStorage.getItem("drawings") === "on";
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("drawings", drawings ? "on" : "off");
+    } catch {
+      // Storage unavailable: the switch still works, it just is not remembered.
+    }
+  }, [drawings]);
 
   // -- create once ---------------------------------------------------------
   useLayoutEffect(() => {
@@ -229,6 +256,15 @@ export default function ChartPane({ data }: { data: ChartData | null }) {
       labels: [motherHigh, motherLow, insideHigh, insideLow].map((s) => createSeriesMarkers(s, [])),
     };
 
+    const steps = chart.addSeries(LineSeries, { ...overlay, color: SOLDIERS, lineWidth: 2 });
+    const start = chart.addSeries(LineSeries, { ...overlay, color: SOLDIERS, lineWidth: 1, lineStyle: LineStyle.Dashed });
+    soldiersRef.current = {
+      steps,
+      start,
+      stepLabels: createSeriesMarkers(steps, []),
+      startLabels: createSeriesMarkers(start, []),
+    };
+
     chart.subscribeCrosshairMove((param) => {
       const bars = barsRef.current;
       if (!bars.length) return;
@@ -276,6 +312,7 @@ export default function ChartPane({ data }: { data: ChartData | null }) {
       markersRef.current = null;
       cupRef.current = null;
       ibRef.current = null;
+      soldiersRef.current = null;
     };
   }, []);
 
@@ -308,56 +345,6 @@ export default function ChartPane({ data }: { data: ChartData | null }) {
       })),
     );
 
-    // Scan signals point at the candle, corporate events sit above it. Both go in
-    // one list, which the chart wants in ascending time order.
-    const signalMarkers = (data?.markers ?? []).map((m) => {
-      const style = PATTERN_STYLE[m.pattern];
-      return {
-        time: m.time as unknown as Time,
-        position: m.direction === "Bearish" ? ("aboveBar" as const) : ("belowBar" as const),
-        color: style?.color ?? (m.direction === "Bearish" ? DOWN : UP),
-        shape: m.direction === "Bearish" ? ("arrowDown" as const) : ("arrowUp" as const),
-        text: `${style ? `${style.tag} ` : ""}${(m.score * 100).toFixed(0)}%`,
-        size: 1,
-      };
-    });
-    const eventMarkers = (data?.events ?? []).map((e) => ({
-      time: e.time as unknown as Time,
-      position: "aboveBar" as const,
-      // Amber when the earlier prices were corrected, grey when NSE gives no
-      // ratio (a demerger) and the cliff is only pointed out.
-      color: e.adjusted ? "#d6a03c" : "#8b97a7",
-      shape: "square" as const,
-      text: e.adjusted ? e.label : `${e.label} (not adjusted)`,
-      size: 1,
-    }));
-    // Today's drawings share one breakout label, set on the candles so it sits
-    // above the candle rather than across it. Both setups can fire on the same
-    // bar, and two labels there would print on top of each other.
-    const ib = data?.insideBar ?? null;
-    const breakoutTime = ib?.breakout.time ?? data?.cup?.breakout.time;
-    const breakoutMarkers = breakoutTime
-      ? [
-          {
-            time: breakoutTime as unknown as Time,
-            position: "aboveBar" as const,
-            color: UP,
-            shape: "arrowUp" as const,
-            text: ib
-              ? `Breakout +${(((ib.breakout.close - ib.inside.high) / ib.inside.high) * 100).toFixed(1)}%`
-              : "Breakout",
-            size: 1,
-          },
-        ]
-      : [];
-    markersRef.current?.setMarkers(
-      [...signalMarkers, ...eventMarkers, ...breakoutMarkers].sort((a, b) =>
-        String(a.time).localeCompare(String(b.time)),
-      ),
-    );
-    if (cupRef.current) drawCup(cupRef.current, data?.cup ?? null, bars);
-    if (ibRef.current) drawInsideBar(ibRef.current, data?.insideBar ?? null);
-
     if (bars.length) {
       // Frame the viewport only when the stock itself changed. The same stock
       // is refetched whenever the engine publishes — every batch of a sync —
@@ -386,6 +373,82 @@ export default function ChartPane({ data }: { data: ChartData | null }) {
       paintLegend(legendRef.current, -1, bars);
     }
   }, [data]);
+
+  // -- markers and drawings -------------------------------------------------
+  // Kept apart from the feed so flipping the Drawings switch only redraws the
+  // overlays and never re-sends the candles.
+  useEffect(() => {
+    const bars = data?.candles ?? [];
+
+    // Scan signals point at the candle, corporate events sit above it. Both go in
+    // one list, which the chart wants in ascending time order.
+    const signalMarkers = (data?.markers ?? []).map((m) => {
+      const style = PATTERN_STYLE[m.pattern];
+      return {
+        time: m.time as unknown as Time,
+        position: m.direction === "Bearish" ? ("aboveBar" as const) : ("belowBar" as const),
+        color: style?.color ?? (m.direction === "Bearish" ? DOWN : UP),
+        shape: m.direction === "Bearish" ? ("arrowDown" as const) : ("arrowUp" as const),
+        text: `${style ? `${style.tag} ` : ""}${(m.score * 100).toFixed(0)}%`,
+        size: 1,
+      };
+    });
+    const eventMarkers = (data?.events ?? []).map((e) => ({
+      time: e.time as unknown as Time,
+      position: "aboveBar" as const,
+      // Amber when the earlier prices were corrected, grey when NSE gives no
+      // ratio (a demerger) and the cliff is only pointed out.
+      color: e.adjusted ? "#d6a03c" : "#8b97a7",
+      shape: "square" as const,
+      text: e.adjusted ? e.label : `${e.label} (not adjusted)`,
+      size: 1,
+    }));
+    // Today's drawings share one breakout label, set on the candles so it sits
+    // above the candle rather than across it. Both setups can fire on the same
+    // bar, and two labels there would print on top of each other. With the
+    // Drawings switch off, none of this is drawn.
+    const ib = drawings ? (data?.insideBar ?? null) : null;
+    const cup = drawings ? (data?.cup ?? null) : null;
+    const soldiers = drawings && data?.soldiers?.bars.length === 3 ? data.soldiers.bars : null;
+    const breakoutTime = ib?.breakout.time ?? cup?.breakout.time;
+    const breakoutMarkers = breakoutTime
+      ? [
+          {
+            time: breakoutTime as unknown as Time,
+            position: "aboveBar" as const,
+            color: UP,
+            shape: "arrowUp" as const,
+            text: ib
+              ? `Breakout +${(((ib.breakout.close - ib.inside.high) / ib.inside.high) * 100).toFixed(1)}%`
+              : "Breakout",
+            size: 1,
+          },
+        ]
+      : [];
+    // Three White Soldiers is not a breakout, so it gets its own label for the
+    // three-day advance. Markers on the same bar and side stack, so it sits
+    // above any breakout label rather than over it.
+    const soldiersMarkers = soldiers
+      ? [
+          {
+            time: soldiers[2].time as unknown as Time,
+            position: "aboveBar" as const,
+            color: SOLDIERS,
+            shape: "arrowUp" as const,
+            text: `3WS +${(((soldiers[2].close - soldiers[0].open) / soldiers[0].open) * 100).toFixed(1)}%`,
+            size: 1,
+          },
+        ]
+      : [];
+    markersRef.current?.setMarkers(
+      [...signalMarkers, ...eventMarkers, ...breakoutMarkers, ...soldiersMarkers].sort((a, b) =>
+        String(a.time).localeCompare(String(b.time)),
+      ),
+    );
+    if (cupRef.current) drawCup(cupRef.current, cup, bars);
+    if (ibRef.current) drawInsideBar(ibRef.current, ib);
+    if (soldiersRef.current) drawSoldiers(soldiersRef.current, soldiers);
+  }, [data, drawings]);
 
   // -- zoom ----------------------------------------------------------------
   const zoom = (factor: number) => {
@@ -445,6 +508,13 @@ export default function ChartPane({ data }: { data: ChartData | null }) {
         <div className="spacer" />
 
         <div className="chart-actions">
+          <button
+            className={drawings ? "on" : ""}
+            onClick={() => setDrawings((d) => !d)}
+            title="Draw today's Cup n Handle, Inside Bar and Three White Soldiers setups on the chart"
+          >
+            Drawings {drawings ? "On" : "Off"}
+          </button>
           <button onClick={() => zoom(0.75)} title="Zoom in">+</button>
           <button onClick={() => zoom(1.35)} title="Zoom out">−</button>
           <button onClick={reset} title="Back to the latest candles">Reset</button>
@@ -585,6 +655,44 @@ function drawInsideBar(layers: InsideBarLayers, ib: InsideBarShape | null) {
   // The breakout arrow itself is drawn on the candles, with the cup's.
   insideHigh.setMarkers([label(ib.breakout.time, "belowBar", IB, `Breakout level ${fmt(ib.inside.high)}`)]);
   insideLow.setMarkers([label(ib.inside.time, "belowBar", IB, `Inside L ${fmt(ib.inside.low)}`)]);
+}
+
+/** Draw today's Three White Soldiers, or clear the drawing when there is none.
+ *
+ *  A step line joins the three closes, each numbered, and a dashed line holds
+ *  the first bar's open across all three, so the climb is read from where it
+ *  started. The advance label is set with the candle markers. */
+function drawSoldiers(layers: SoldiersLayers, bars: BarPoint[] | null) {
+  if (!bars) {
+    layers.steps.setData([]);
+    layers.start.setData([]);
+    layers.stepLabels.setMarkers([]);
+    layers.startLabels.setMarkers([]);
+    return;
+  }
+  const t = (time: string) => time as unknown as Time;
+  layers.steps.setData(bars.map((b) => ({ time: t(b.time), value: b.close })));
+  layers.start.setData(bars.map((b) => ({ time: t(b.time), value: bars[0].open })));
+  layers.stepLabels.setMarkers(
+    bars.map((b, k) => ({
+      time: t(b.time),
+      position: "aboveBar" as const,
+      color: SOLDIERS,
+      shape: "circle" as const,
+      text: String(k + 1),
+      size: 0.5,
+    })),
+  );
+  layers.startLabels.setMarkers([
+    {
+      time: t(bars[0].time),
+      position: "belowBar" as const,
+      color: SOLDIERS,
+      shape: "circle" as const,
+      text: `Start ${fmt(bars[0].open)}`,
+      size: 0.5,
+    },
+  ]);
 }
 
 /** Written straight to the DOM — this runs on every crosshair pixel. */
