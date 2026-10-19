@@ -26,6 +26,7 @@ pub struct PatternParams {
 pub fn detect_all(candles: &[Candle], params: &PatternParams) -> Vec<Detection> {
     let mut all = scans::cup_breakout(candles, &params.chartink);
     all.extend(scans::inside_bar_breakout(candles));
+    all.extend(scans::three_white_soldiers(candles));
 
     all.sort_by(|a, b| {
         (a.kind.key(), a.end)
@@ -92,8 +93,13 @@ mod tests {
         use types::PatternKind;
         for d in detect_all(&candles(220), &PatternParams::default()) {
             assert!(
-                matches!(d.kind, PatternKind::ChartinkCupBreakout | PatternKind::ChartinkInsideBarBreakout),
-                "the catalogue is two scans; {:?} should not exist",
+                matches!(
+                    d.kind,
+                    PatternKind::ChartinkCupBreakout
+                        | PatternKind::ChartinkInsideBarBreakout
+                        | PatternKind::ChartinkThreeWhiteSoldiers
+                ),
+                "the catalogue is three scans; {:?} should not exist",
                 d.kind
             );
         }

@@ -1326,6 +1326,18 @@ impl SpiderApp {
         });
 
         ui.add_space(12.0);
+        ui.collapsing("Three White Soldiers — your Chartink scan", |ui| {
+            ui.label(
+                RichText::new(
+                    "Three green bars, each opening and closing above the one before, and each \
+                     with an upper wick under half its body. It has no tunable thresholds.",
+                )
+                .small()
+                .weak(),
+            );
+        });
+
+        ui.add_space(12.0);
         ui.collapsing("Cup n Handle — your Chartink scan", |ui| {
             ui.label(
                 RichText::new(

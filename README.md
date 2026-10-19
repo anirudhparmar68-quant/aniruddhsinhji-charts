@@ -610,6 +610,19 @@ Close           >  1 day ago High       today closes above yesterday's high
 It has no tunable thresholds. The score rises with how far today's close clears
 yesterday's high, with 3% or more as full marks.
 
+**`Three White Soldiers`**: the conditions of a third Chartink scan, on daily bars
+for the cash segment, all required:
+
+```text
+Close > Open                          on today, 1 day ago and 2 days ago
+Close > 1 day ago Close               and 1 day ago Close > 2 days ago Close
+Open  > 1 day ago Open                and 1 day ago Open  > 2 days ago Open
+High - Close < (Close - Open) × 0.5   on today, 1 day ago and 2 days ago
+```
+
+It has no tunable thresholds. The score rises with the three-day advance from the
+first bar's open to today's close, with 15% or more as full marks.
+
 ---
 
 ## Settings

@@ -256,10 +256,104 @@ pub fn inside_bar_breakout(candles: &[Candle]) -> Vec<Detection> {
     out
 }
 
+/// Every bar that completes three white soldiers, as the owner's Chartink scan
+/// defines them over the last three daily bars:
+///
+/// ```text
+/// Close > Open                           on each of the three bars
+/// Close > 1 day ago Close                and 1 day ago Close > 2 days ago Close
+/// Open  > 1 day ago Open                 and 1 day ago Open  > 2 days ago Open
+/// High - Close < (Close - Open) × 0.5    on each of the three bars
+/// ```
+pub fn three_white_soldiers(candles: &[Candle]) -> Vec<Detection> {
+    // Green, with an upper wick under half the body: it closed near its high.
+    let soldier = |c: &Candle| c.close > c.open && (c.high - c.close) < (c.close - c.open) * 0.5;
+
+    let mut out = Vec::new();
+    for i in 2..candles.len() {
+        let (first, second, third) = (&candles[i - 2], &candles[i - 1], &candles[i]);
+        if !(soldier(first) && soldier(second) && soldier(third)) {
+            continue;
+        }
+        if !(third.close > second.close && second.close > first.close) {
+            continue;
+        }
+        if !(third.open > second.open && second.open > first.open) {
+            continue;
+        }
+
+        // Score by the three-day advance from the first open; 15% or more is full
+        // marks. At 6%, four in five hits scored 1.0 and the score ranked nothing.
+        let gain = (third.close - first.open) / first.open.max(f64::EPSILON);
+        let score = 0.70 + (gain / 0.15).clamp(0.0, 1.0) * 0.30;
+
+        out.push(
+            Detection::new(K::ChartinkThreeWhiteSoldiers, i - 2, i, score).with_detail(format!(
+                "three green bars, each closing higher · +{:.1}% from the first open",
+                gain * 100.0
+            )),
+        );
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::NaiveDate;
+
+    fn ohlc(day: i64, open: f64, high: f64, low: f64, close: f64) -> Candle {
+        Candle {
+            date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap() + chrono::Duration::days(day),
+            open,
+            high,
+            low,
+            close,
+            volume: 100_000,
+        }
+    }
+
+    /// Three green bars, each opening and closing higher, each closing near its high.
+    fn soldiers() -> Vec<Candle> {
+        vec![
+            ohlc(0, 100.0, 104.5, 99.5, 104.0),  // body 4.0, upper wick 0.5
+            ohlc(1, 102.0, 107.5, 101.5, 107.0), // body 5.0, upper wick 0.5
+            ohlc(2, 105.0, 111.0, 104.5, 110.5), // body 5.5, upper wick 0.5
+        ]
+    }
+
+    #[test]
+    fn three_white_soldiers_fires_on_the_third_bar() {
+        let hits = three_white_soldiers(&soldiers());
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].kind, K::ChartinkThreeWhiteSoldiers);
+        assert_eq!((hits[0].start, hits[0].end), (0, 2));
+    }
+
+    #[test]
+    fn three_white_soldiers_rejects_a_long_upper_wick() {
+        let mut candles = soldiers();
+        candles[1].high = 109.5; // wick 2.5 is exactly half the 5.0 body: not strictly less
+        assert!(three_white_soldiers(&candles).is_empty());
+    }
+
+    #[test]
+    fn three_white_soldiers_needs_higher_opens_and_closes() {
+        let mut lower_open = soldiers();
+        lower_open[2].open = 101.5; // below the second bar's 102 open
+        assert!(three_white_soldiers(&lower_open).is_empty());
+
+        let mut equal_close = soldiers();
+        equal_close[2] = ohlc(2, 103.0, 107.2, 102.5, 107.0); // same close as the second bar
+        assert!(three_white_soldiers(&equal_close).is_empty());
+    }
+
+    #[test]
+    fn three_white_soldiers_needs_three_green_bars() {
+        let mut candles = soldiers();
+        candles[1] = ohlc(1, 107.0, 107.5, 101.5, 106.0); // red: close below open
+        assert!(three_white_soldiers(&candles).is_empty());
+    }
 
     fn bar(day: i64, high: f64, low: f64, close: f64) -> Candle {
         Candle {

@@ -94,6 +94,7 @@ patterns! {
     // not a matter of opinion. Both removed sets live in git history.
     ChartinkCupBreakout => ("Cup n Handle", Chart, Bullish),
     ChartinkInsideBarBreakout => ("Inside Bar Breakout", Chart, Bullish),
+    ChartinkThreeWhiteSoldiers => ("Three White Soldiers", Chart, Bullish),
 }
 
 /// One recognised pattern occurrence.
@@ -168,7 +169,11 @@ mod tests {
         // If either ever comes back, this is the line that will say so.
         assert_eq!(
             PatternKind::ALL,
-            &[PatternKind::ChartinkCupBreakout, PatternKind::ChartinkInsideBarBreakout]
+            &[
+                PatternKind::ChartinkCupBreakout,
+                PatternKind::ChartinkInsideBarBreakout,
+                PatternKind::ChartinkThreeWhiteSoldiers,
+            ]
         );
         assert!(PatternKind::ALL.iter().all(|k| k.family() == Chart));
     }
